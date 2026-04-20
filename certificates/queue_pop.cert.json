@@ -1,0 +1,70 @@
+{
+  "function": "Queue::pop",
+  "potential": "2*len(self.back)",
+  "coefficients": {
+    "a_self_front": 0,
+    "a_self_back": 2,
+    "c_pop": 1
+  },
+  "obligations": [
+    {
+      "name": "pop-normal",
+      "actual": {
+        "constant": 1,
+        "terms": {}
+      },
+      "phi_before": {
+        "constant": 0,
+        "terms": {
+          "a_self_front*F": 1,
+          "a_self_back*B": 1
+        }
+      },
+      "phi_after": {
+        "constant": 0,
+        "terms": {
+          "a_self_front*F": 1,
+          "a_self_back*B": 1
+        }
+      },
+      "amortized": {
+        "constant": 0,
+        "terms": {
+          "c_pop": 1
+        }
+      },
+      "explanation": "normal branch: front.pop"
+    },
+    {
+      "name": "pop-transfer",
+      "actual": {
+        "constant": 1,
+        "terms": {
+          "B": 2
+        }
+      },
+      "phi_before": {
+        "constant": 0,
+        "terms": {
+          "a_self_front*F": 1,
+          "a_self_back*B": 1
+        }
+      },
+      "phi_after": {
+        "constant": 0,
+        "terms": {
+          "a_self_front*F": 1,
+          "a_self_front*B": 1,
+          "a_self_front": -1
+        }
+      },
+      "amortized": {
+        "constant": 0,
+        "terms": {
+          "c_pop": 1
+        }
+      },
+      "explanation": "draining loop back->front"
+    }
+  ]
+}

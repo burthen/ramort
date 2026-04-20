@@ -1,0 +1,520 @@
+# Trusted RAMORT model for selected Rust standard-library containers.
+# These are resource contracts, not full implementations.
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "Vec"
+method = "push"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = ["len(receiver) += 1"]
+requires = "MutBorrow"
+notes = ["Trusted amortized model for Vec::push; resize/allocator hidden behind amortized contract."]
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "Vec"
+method = "pop"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = ["len(receiver) -= 1"]
+requires = "MutBorrow"
+condition = "old(len(receiver)) > 0"
+returns = "Some iff old(len(receiver)) > 0"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "Vec"
+method = "is_empty"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = []
+requires = "SharedBorrow"
+condition = "len(receiver) == 0"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "Vec"
+method = "clear"
+receiver_arg = 0
+cost = "len(receiver)"
+effects = ["len(receiver) := 0"]
+requires = "MutBorrow"
+partial_unknown = "drop_cost_T * old(len(receiver))"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "VecDeque"
+method = "push_back"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = ["len(receiver) += 1"]
+requires = "MutBorrow"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "VecDeque"
+method = "pop_front"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = ["len(receiver) -= 1"]
+requires = "MutBorrow"
+condition = "old(len(receiver)) > 0"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "VecDeque"
+method = "pop_back"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = ["len(receiver) -= 1"]
+requires = "MutBorrow"
+condition = "old(len(receiver)) > 0"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "String"
+method = "push"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = ["bytes(receiver) += 1"]
+requires = "MutBorrow"
+notes = ["Simplified char push model; true byte growth depends on char UTF-8 length."]
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "String"
+method = "push_str"
+receiver_arg = 0
+cost = "n"
+amortized_cost = "n"
+effects = ["bytes(receiver) += n"]
+requires = "MutBorrow"
+partial_unknown = "n = len(argument bytes)"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "HashMap"
+method = "insert"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = ["len(receiver) += 1"]
+requires = "MutBorrow"
+partial_unknown = "K_hash + K_eq + possible replacement/drop cost"
+notes = ["Trusted average/amortized hash-table model; generic costs remain symbolic."]
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "HashSet"
+method = "insert"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = ["len(receiver) += 1"]
+requires = "MutBorrow"
+partial_unknown = "K_hash + K_eq"
+
+
+# --- Extra Vec<T> operations ---
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "Vec"
+method = "insert"
+receiver_arg = 0
+cost = "n"
+amortized_cost = "n"
+effects = ["len(receiver) += 1"]
+requires = "MutBorrow"
+partial_unknown = "n = elements shifted after insertion index"
+notes = ["Vec::insert shifts tail elements."]
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "Vec"
+method = "remove"
+receiver_arg = 0
+cost = "n"
+amortized_cost = "n"
+effects = ["len(receiver) -= 1"]
+requires = "MutBorrow"
+condition = "index < old(len(receiver))"
+returns = "removed element"
+partial_unknown = "n = elements shifted after removed index"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "Vec"
+method = "swap_remove"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = ["len(receiver) -= 1"]
+requires = "MutBorrow"
+condition = "index < old(len(receiver))"
+returns = "removed element"
+notes = ["Order is not preserved."]
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "Vec"
+method = "truncate"
+receiver_arg = 0
+cost = "n"
+amortized_cost = "n"
+effects = ["len(receiver) := n"]
+requires = "MutBorrow"
+condition = "n <= old(len(receiver))"
+partial_unknown = "drop_cost_T * removed elements"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "Vec"
+method = "get"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = []
+requires = "SharedBorrow"
+returns = "Option<&T>"
+
+# --- LinkedList<T> ---
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "LinkedList"
+method = "push_front"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = ["len(receiver) += 1"]
+requires = "MutBorrow"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "LinkedList"
+method = "push_back"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = ["len(receiver) += 1"]
+requires = "MutBorrow"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "LinkedList"
+method = "pop_front"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = ["len(receiver) -= 1"]
+requires = "MutBorrow"
+condition = "old(len(receiver)) > 0"
+returns = "Some iff old(len(receiver)) > 0"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "LinkedList"
+method = "pop_back"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = ["len(receiver) -= 1"]
+requires = "MutBorrow"
+condition = "old(len(receiver)) > 0"
+returns = "Some iff old(len(receiver)) > 0"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "LinkedList"
+method = "len"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = []
+requires = "SharedBorrow"
+returns = "len(receiver)"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "LinkedList"
+method = "clear"
+receiver_arg = 0
+cost = "len(receiver)"
+effects = ["len(receiver) := 0"]
+requires = "MutBorrow"
+partial_unknown = "drop_cost_T * old(len(receiver))"
+
+# --- BTreeMap<K,V> ---
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "BTreeMap"
+method = "insert"
+receiver_arg = 0
+cost = "logn"
+amortized_cost = "logn"
+effects = ["len(receiver) += 1"]
+requires = "MutBorrow"
+returns = "Option<V>; Some when key existed"
+partial_unknown = "K_ord*logn; len effect is conservative if key already existed"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "BTreeMap"
+method = "remove"
+receiver_arg = 0
+cost = "logn"
+amortized_cost = "logn"
+effects = ["len(receiver) -= 1"]
+requires = "MutBorrow"
+condition = "key exists"
+returns = "Option<V>"
+partial_unknown = "K_ord*logn; len effect applies only if key existed"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "BTreeMap"
+method = "get"
+receiver_arg = 0
+cost = "logn"
+amortized_cost = "logn"
+effects = []
+requires = "SharedBorrow"
+returns = "Option<&V>"
+partial_unknown = "K_ord*logn"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "BTreeMap"
+method = "contains_key"
+receiver_arg = 0
+cost = "logn"
+amortized_cost = "logn"
+effects = []
+requires = "SharedBorrow"
+returns = "bool"
+partial_unknown = "K_ord*logn"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "BTreeMap"
+method = "len"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = []
+requires = "SharedBorrow"
+returns = "len(receiver)"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "BTreeMap"
+method = "clear"
+receiver_arg = 0
+cost = "len(receiver)"
+effects = ["len(receiver) := 0"]
+requires = "MutBorrow"
+partial_unknown = "drop_cost_KV * old(len(receiver))"
+
+# --- BTreeSet<T> ---
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "BTreeSet"
+method = "insert"
+receiver_arg = 0
+cost = "logn"
+amortized_cost = "logn"
+effects = ["len(receiver) += 1"]
+requires = "MutBorrow"
+returns = "bool; true when value was newly inserted"
+partial_unknown = "K_ord*logn; len effect is conservative if value already existed"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "BTreeSet"
+method = "remove"
+receiver_arg = 0
+cost = "logn"
+amortized_cost = "logn"
+effects = ["len(receiver) -= 1"]
+requires = "MutBorrow"
+condition = "value exists"
+returns = "bool"
+partial_unknown = "K_ord*logn; len effect applies only if value existed"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "BTreeSet"
+method = "contains"
+receiver_arg = 0
+cost = "logn"
+amortized_cost = "logn"
+effects = []
+requires = "SharedBorrow"
+returns = "bool"
+partial_unknown = "K_ord*logn"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "BTreeSet"
+method = "len"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = []
+requires = "SharedBorrow"
+returns = "len(receiver)"
+
+# --- BinaryHeap<T> ---
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "BinaryHeap"
+method = "push"
+receiver_arg = 0
+cost = "logn"
+amortized_cost = "logn"
+effects = ["len(receiver) += 1"]
+requires = "MutBorrow"
+partial_unknown = "K_ord*logn"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "BinaryHeap"
+method = "pop"
+receiver_arg = 0
+cost = "logn"
+amortized_cost = "logn"
+effects = ["len(receiver) -= 1"]
+requires = "MutBorrow"
+condition = "old(len(receiver)) > 0"
+returns = "Some iff old(len(receiver)) > 0"
+partial_unknown = "K_ord*logn"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "BinaryHeap"
+method = "peek"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = []
+requires = "SharedBorrow"
+returns = "Option<&T>"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "BinaryHeap"
+method = "len"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = []
+requires = "SharedBorrow"
+returns = "len(receiver)"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "BinaryHeap"
+method = "clear"
+receiver_arg = 0
+cost = "len(receiver)"
+effects = ["len(receiver) := 0"]
+requires = "MutBorrow"
+partial_unknown = "drop_cost_T * old(len(receiver))"
+
+# --- Extra HashMap / HashSet operations ---
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "HashMap"
+method = "get"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = []
+requires = "SharedBorrow"
+returns = "Option<&V>"
+partial_unknown = "expected cost; K_hash + K_eq"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "HashMap"
+method = "remove"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = ["len(receiver) -= 1"]
+requires = "MutBorrow"
+condition = "key exists"
+returns = "Option<V>"
+partial_unknown = "expected cost; K_hash + K_eq; len effect applies only if key existed"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "HashMap"
+method = "contains_key"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = []
+requires = "SharedBorrow"
+returns = "bool"
+partial_unknown = "expected cost; K_hash + K_eq"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "HashMap"
+method = "len"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = []
+requires = "SharedBorrow"
+returns = "len(receiver)"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "HashSet"
+method = "contains"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = []
+requires = "SharedBorrow"
+returns = "bool"
+partial_unknown = "expected cost; K_hash + K_eq"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "HashSet"
+method = "remove"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = ["len(receiver) -= 1"]
+requires = "MutBorrow"
+condition = "value exists"
+returns = "bool"
+partial_unknown = "expected cost; K_hash + K_eq; len effect applies only if value existed"
+
+[[summaries]]
+trust = "TrustedStd"
+type_contains = "HashSet"
+method = "len"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "1"
+effects = []
+requires = "SharedBorrow"
+returns = "len(receiver)"

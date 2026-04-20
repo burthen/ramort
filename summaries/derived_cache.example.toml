@@ -1,0 +1,12 @@
+# Example of a RAMORT-derived verified summary cache.
+
+[[summaries]]
+trust = "Verified"
+type_contains = "Queue"
+method = "push"
+receiver_arg = 0
+cost = "1"
+amortized_cost = "3"
+effects = ["len(receiver.back) += 1"]
+requires = "MutBorrow"
+notes = ["Example only: actual derived summaries should be emitted by analysis after exact verification."]

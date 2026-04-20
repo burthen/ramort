@@ -1,0 +1,9 @@
+[package]
+name = "ramort-solver-goodlp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ramort-core = { path = "../ramort-core" }
+good_lp = { version = "1.15", default-features = false, features = ["highs"] }

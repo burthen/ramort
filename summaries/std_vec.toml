@@ -1,0 +1,23 @@
+[[summaries]]
+type_contains = "Vec"
+method = "push"
+receiver_arg = 0
+cost = "1"
+effects = ["len(receiver) += 1"]
+requires = "MutBorrow"
+
+[[summaries]]
+type_contains = "Vec"
+method = "pop"
+receiver_arg = 0
+cost = "1"
+effects = ["len(receiver) -= 1"]
+condition = "old(len(receiver)) > 0"
+
+[[summaries]]
+type_contains = "Vec"
+method = "is_empty"
+receiver_arg = 0
+cost = "1"
+effects = []
+condition = "len(receiver) == 0"

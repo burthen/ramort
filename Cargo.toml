@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/ramort-core",
+  "crates/ramort-solver-goodlp",
+  "crates/cargo-ramort",
+  "crates/ramort-frontend-rustc",
+]
+default-members = [
+  "crates/ramort-core",
+  "crates/ramort-solver-goodlp",
+  "crates/cargo-ramort",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+version = "0.5.0"
