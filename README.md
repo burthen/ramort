@@ -1,5 +1,7 @@
 # RAMORT
 
+### NB: This is a toy project for fun and it is at the preliminary research stage
+
 RAMORT is a Rust resource-analysis prototype. It collects a compact MIR-derived
 IR, applies trusted and user-provided resource summaries, builds amortized proof
 obligations, solves them with an integer LP backend, and exactly checks the
