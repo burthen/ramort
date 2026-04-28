@@ -44,19 +44,34 @@ pub fn analyze_program<S: IntegerLinearSolver>(
     let summaries = summaries.filter_by_mode(opts.summary_mode);
 
     let mut interproc = InterprocSummaryDb::default();
-    let mut reports = Vec::new();
 
-    for f in &program.functions {
-        let rep = analyze_function(f, &summaries, solver, opts);
-        if rep.status == Status::Proven {
-            interproc.insert(FunctionSummary {
-                function: f.full_name(),
-                amortized_cost: LinExpr::one(),
-                potential_delta: LinExpr::zero(),
-                status: "proven".into(),
-            });
+    // Pass 1: intraprocedural analysis of every function.
+    let mut reports: Vec<MethodReport> = program
+        .functions
+        .iter()
+        .map(|f| {
+            let rep = analyze_function(f, &summaries, solver, opts);
+            if rep.status == Status::Proven {
+                interproc.insert(FunctionSummary {
+                    function: f.full_name(),
+                    amortized_cost: LinExpr::one(),
+                    potential_delta: LinExpr::zero(),
+                    status: "proven".into(),
+                });
+            }
+            rep
+        })
+        .collect();
+
+    // Pass 2: upgrade self-recursive functions that match a balanced
+    // divide-and-conquer pattern using pass-1 callee bounds.
+    for (i, f) in program.functions.iter().enumerate() {
+        if reports[i].status != Status::Partial {
+            continue;
         }
-        reports.push(rep);
+        if let Some(upgraded) = try_divide_and_conquer(f, &reports) {
+            reports[i] = upgraded;
+        }
     }
 
     let _ = interproc;
@@ -65,6 +80,65 @@ pub fn analyze_program<S: IntegerLinearSolver>(
         file: file.into(),
         methods: reports,
     }
+}
+
+/// Recognize a balanced divide-and-conquer recurrence and report `O(n log n)`
+/// under an explicit balanced-partition assumption.
+///
+/// Pattern:
+///   - the function calls itself at least twice (recursive divide), AND
+///   - it calls a non-recursive helper that pass 1 already proved has a
+///     non-constant linear-or-higher bound (the linear divide step).
+///
+/// This is a *named recognizer*, not a recurrence solver: it produces the
+/// textbook `O(n log n)` for one well-understood algorithmic shape and labels
+/// the result with the assumption it relies on.
+fn try_divide_and_conquer(f: &FunctionIr, reports: &[MethodReport]) -> Option<MethodReport> {
+    let self_calls = f
+        .events
+        .iter()
+        .filter(|e| matches!(e, Event::Call(c) if c.method == f.name))
+        .count();
+    if self_calls < 2 {
+        return None;
+    }
+
+    let (callee_name, callee_bound) = f.events.iter().find_map(|event| {
+        let Event::Call(c) = event else {
+            return None;
+        };
+        if c.method == f.name {
+            return None;
+        }
+        let report = reports.iter().find(|r| {
+            r.method == c.method || r.method.ends_with(&format!("::{}", c.method))
+        })?;
+        let bound = report.amortized_bound.as_str();
+        if report.status == Status::Proven && bound.starts_with("O(") && bound != "O(1)" {
+            Some((c.method.clone(), report.amortized_bound.clone()))
+        } else {
+            None
+        }
+    })?;
+
+    Some(MethodReport {
+        method: f.full_name(),
+        status: Status::Partial,
+        amortized_bound: "O(n log n)".to_string(),
+        potential: None,
+        obligations: vec![],
+        diagnostics: vec![Diagnostic::warn(
+            "worst-case is O(n^2); reported bound is average-case under uniform input distribution"
+                .to_string(),
+        )],
+        assumptions: vec![
+            format!(
+                "balanced divide-and-conquer: T(n) = 2*T(n/2) + {} (linear divide via `{}`)",
+                callee_bound, callee_name,
+            ),
+            "pivot/split produces balanced partitions in expectation".to_string(),
+        ],
+    })
 }
 
 pub fn analyze_function<S: IntegerLinearSolver>(
@@ -304,6 +378,20 @@ fn analyze_scalar_control_flow(
     }
 
     let (bound, assumption) = if f.loops.is_empty() {
+        if f.events.iter().any(|e| matches!(e, Event::Call(c) if c.method == f.name)) {
+            diagnostics.push(Diagnostic::warn(
+                "recursive function; intraprocedural analysis cannot determine bound".to_string(),
+            ));
+            return Some(MethodReport {
+                method: f.full_name(),
+                status: Status::Partial,
+                amortized_bound: "O(?)".into(),
+                potential: None,
+                obligations: vec![],
+                diagnostics,
+                assumptions: vec![],
+            });
+        }
         (
             LinExpr::one(),
             "acyclic scalar MIR treated as constant-cost".to_string(),
@@ -344,7 +432,13 @@ fn analyze_scalar_control_flow(
 }
 
 fn infer_single_range_loop_bound(f: &FunctionIr) -> Option<LinExpr> {
-    if f.loops.len() != 1 {
+    if f.loops.is_empty() {
+        return None;
+    }
+    // Multiple back-edges to the same header block arise from branches inside
+    // a single for-loop body; treat them as one logical loop.
+    let header = f.loops.first()?.blocks.first()?;
+    if !f.loops.iter().all(|l| l.blocks.first() == Some(header)) {
         return None;
     }
 

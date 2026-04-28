@@ -48,8 +48,8 @@ mod rustc_collector {
     use rustc_hir::def_id::{LocalDefId, LOCAL_CRATE};
     use rustc_interface::interface;
     use rustc_middle::mir::{
-        BasicBlock, Body, BorrowKind, Local, Operand, Place, ProjectionElem, Rvalue, StatementKind,
-        TerminatorKind, VarDebugInfoContents,
+        AggregateKind, BasicBlock, Body, BorrowKind, Local, Operand, Place, ProjectionElem, Rvalue,
+        StatementKind, TerminatorKind, VarDebugInfoContents,
     };
     use rustc_middle::ty::{Ty, TyCtxt, TyKind};
     use rustc_span::Spanned;
@@ -369,6 +369,9 @@ mod rustc_collector {
                         ) {
                             events.push(event);
                         }
+                        if let Some(event) = range_aggregate_event(tcx, bb, rvalue, local_names) {
+                            events.push(event);
+                        }
                         transfer_assignment(tcx, body, self_local, &mut state, *target, rvalue);
                     }
                     _ => {}
@@ -448,15 +451,17 @@ mod rustc_collector {
                         .unwrap_or_else(|| "<unresolved>".into())
                 ),
             })),
-            Rvalue::RawPtr(_, source) => Some(Event::Unsafe {
-                block: bb.index(),
-                detail: format!(
-                    "raw address of {}",
-                    resource_path_for_place(tcx, body, self_local, state, *source)
-                        .map(|p| p.to_string())
-                        .unwrap_or_else(|| "<unresolved>".into())
-                ),
-            }),
+            Rvalue::RawPtr(_, source) => {
+                // Only flag raw pointers that resolve to a tracked resource path.
+                // Slice element accesses and bounds-check helpers produce `None` here
+                // because slices are not tracked resources; skip them so they don't
+                // block analysis of safe code that happens to use raw pointers in MIR.
+                let path = resource_path_for_place(tcx, body, self_local, state, *source)?;
+                Some(Event::Unsafe {
+                    block: bb.index(),
+                    detail: format!("raw address of {path}"),
+                })
+            }
             _ => None,
         }
     }
@@ -504,6 +509,40 @@ mod rustc_collector {
                 .and_then(|item| item.trait_container(tcx))
                 .is_some(),
         })
+    }
+
+    fn range_aggregate_event<'tcx>(
+        tcx: TyCtxt<'tcx>,
+        bb: BasicBlock,
+        rvalue: &Rvalue<'tcx>,
+        local_names: &BTreeMap<Local, String>,
+    ) -> Option<Event> {
+        let Rvalue::Aggregate(kind, fields) = rvalue else {
+            return None;
+        };
+        let AggregateKind::Adt(did, ..) = &**kind else {
+            return None;
+        };
+        let type_path = tcx.def_path_str(*did);
+        let type_name = type_path.rsplit("::").next().unwrap_or(&type_path);
+        if type_name != "Range" && type_name != "RangeInclusive" {
+            return None;
+        }
+        let callee = if type_name == "RangeInclusive" {
+            "std::ops::RangeInclusive::<Idx>::new".to_string()
+        } else {
+            "std::ops::Range::<Idx>::new".to_string()
+        };
+        Some(Event::Call(CallEvent {
+            block: bb.index(),
+            callee,
+            method: "new".to_string(),
+            receiver: None,
+            receiver_ty: None,
+            receiver_access: AccessKind::Unknown,
+            args: fields.iter().map(|op| format_operand_arg(op, local_names)).collect(),
+            is_trait_call: false,
+        }))
     }
 
     fn local_debug_names<'tcx>(body: &'tcx Body<'tcx>) -> BTreeMap<Local, String> {
@@ -663,11 +702,16 @@ mod rustc_collector {
         let mut seen = BTreeSet::new();
 
         for (bb, data) in body.basic_blocks.iter_enumerated() {
+            if data.is_cleanup {
+                continue;
+            }
             if let Some(term) = &data.terminator {
                 for succ in term.successors() {
-                    if succ.index() <= bb.index() {
-                        let blocks = (succ.index()..=bb.index()).collect::<Vec<_>>();
-                        if seen.insert(blocks.clone()) {
+                    if succ.index() <= bb.index() && !body.basic_blocks[succ].is_cleanup {
+                        let blocks = (succ.index()..=bb.index())
+                            .filter(|&i| !body.basic_blocks[BasicBlock::from_usize(i)].is_cleanup)
+                            .collect::<Vec<_>>();
+                        if !blocks.is_empty() && seen.insert(blocks.clone()) {
                             loops.push(LoopRegion { blocks });
                         }
                     }
