@@ -8,6 +8,7 @@ use crate::loop_summary::infer_draining_loop;
 use crate::lp::{IntegerLinearSolver, LinearProblem};
 use crate::obligation::{verify_candidate, Obligation, PotentialTemplate};
 use crate::policy::SoundnessPolicy;
+use crate::recurrence::{BoundClass, BranchShape, Recurrence, SolveRule};
 use crate::report::{AnalysisReport, Diagnostic, MethodReport, Status};
 use crate::summary::SummaryDb;
 use crate::summary_mode::SummaryMode;
@@ -63,13 +64,13 @@ pub fn analyze_program<S: IntegerLinearSolver>(
         })
         .collect();
 
-    // Pass 2: upgrade self-recursive functions that match a balanced
-    // divide-and-conquer pattern using pass-1 callee bounds.
+    // Pass 2: re-analyze self-recursive functions by extracting a cost
+    // recurrence and solving it (Master theorem / linear recurrence).
     for (i, f) in program.functions.iter().enumerate() {
         if reports[i].status != Status::Partial {
             continue;
         }
-        if let Some(upgraded) = try_divide_and_conquer(f, &reports) {
+        if let Some(upgraded) = try_solve_recurrence(f, &reports) {
             reports[i] = upgraded;
         }
     }
@@ -82,63 +83,148 @@ pub fn analyze_program<S: IntegerLinearSolver>(
     }
 }
 
-/// Recognize a balanced divide-and-conquer recurrence and report `O(n log n)`
-/// under an explicit balanced-partition assumption.
+/// Extract a cost recurrence from a self-recursive function and solve it
+/// using the [`recurrence`](crate::recurrence) module.
 ///
-/// Pattern:
-///   - the function calls itself at least twice (recursive divide), AND
-///   - it calls a non-recursive helper that pass 1 already proved has a
-///     non-constant linear-or-higher bound (the linear divide step).
+/// Extraction is deliberately coarse:
+///   - `branches` = number of self-recursive `Event::Call`s.
+///   - `non_recursive_cost` = max bound over non-recursive proven callees,
+///     fused with the constant cost of the function body. This is sound as an
+///     upper bound on the per-call work.
+///   - `shape` = `Divide(2)` when there are ≥2 recursive calls (assumed
+///     balanced split), `Decrement(1)` for a single recursive call. Both are
+///     reported as explicit assumptions in the output.
 ///
-/// This is a *named recognizer*, not a recurrence solver: it produces the
-/// textbook `O(n log n)` for one well-understood algorithmic shape and labels
-/// the result with the assumption it relies on.
-fn try_divide_and_conquer(f: &FunctionIr, reports: &[MethodReport]) -> Option<MethodReport> {
-    let self_calls = f
+/// What the solver does (vs. a hard-coded recognizer): the same extractor +
+/// solver handles balanced D&C, single-recursive linear chains, and
+/// `T(n)=T(n/2)+O(1)` (binary search) without per-pattern code.
+fn try_solve_recurrence(f: &FunctionIr, reports: &[MethodReport]) -> Option<MethodReport> {
+    let branches = f
         .events
         .iter()
         .filter(|e| matches!(e, Event::Call(c) if c.method == f.name))
-        .count();
-    if self_calls < 2 {
+        .count() as u32;
+    if branches == 0 {
         return None;
     }
 
-    let (callee_name, callee_bound) = f.events.iter().find_map(|event| {
+    let mut callee_bound = BoundClass::Constant;
+    let mut callee_witness: Option<(String, String)> = None;
+    for event in &f.events {
         let Event::Call(c) = event else {
-            return None;
+            continue;
         };
         if c.method == f.name {
-            return None;
+            continue;
         }
-        let report = reports.iter().find(|r| {
+        let Some(report) = reports.iter().find(|r| {
             r.method == c.method || r.method.ends_with(&format!("::{}", c.method))
-        })?;
-        let bound = report.amortized_bound.as_str();
-        if report.status == Status::Proven && bound.starts_with("O(") && bound != "O(1)" {
-            Some((c.method.clone(), report.amortized_bound.clone()))
-        } else {
-            None
+        }) else {
+            continue;
+        };
+        if report.status != Status::Proven {
+            continue;
         }
-    })?;
+        let Some(class) = parse_bound_class(report.amortized_bound.as_str()) else {
+            continue;
+        };
+        if class > callee_bound {
+            callee_bound = class;
+            callee_witness = Some((c.method.clone(), report.amortized_bound.clone()));
+        }
+    }
+
+    let shape = if branches >= 2 {
+        BranchShape::Divide(2)
+    } else {
+        BranchShape::Decrement(1)
+    };
+
+    let recurrence = Recurrence {
+        branches,
+        shape,
+        non_recursive_cost: callee_bound,
+    };
+    let solution = recurrence.solve().ok()?;
+
+    let mut assumptions = vec![format!(
+        "extracted recurrence {} (solved by {})",
+        recurrence.equation(),
+        solution.rule,
+    )];
+    if let BranchShape::Divide(_) = shape {
+        if branches >= 2 {
+            assumptions.push(
+                "subproblems assumed balanced (split sizes treated as n/2); not verified by dataflow"
+                    .to_string(),
+            );
+        }
+    }
+    if let Some((callee, bound)) = callee_witness {
+        assumptions.push(format!("non-recursive cost f(n) inferred from `{callee}` ({bound})"));
+    }
+
+    let mut diagnostics = Vec::new();
+    if matches!(shape, BranchShape::Divide(_)) && branches >= 2 {
+        diagnostics.push(Diagnostic::warn(
+            "split sizes are not verified; an adversarial split shape may give a worse worst case"
+                .to_string(),
+        ));
+    }
+    if matches!(solution.rule, SolveRule::MasterCase1 { .. } | SolveRule::MasterCase3 { .. }) {
+        diagnostics.push(Diagnostic::info(format!(
+            "Master theorem fired with non-tight case; bound {} reflects dominant term",
+            solution.bound
+        )));
+    }
 
     Some(MethodReport {
         method: f.full_name(),
         status: Status::Partial,
-        amortized_bound: "O(n log n)".to_string(),
+        amortized_bound: solution.bound.to_string(),
         potential: None,
         obligations: vec![],
-        diagnostics: vec![Diagnostic::warn(
-            "worst-case is O(n^2); reported bound is average-case under uniform input distribution"
-                .to_string(),
-        )],
-        assumptions: vec![
-            format!(
-                "balanced divide-and-conquer: T(n) = 2*T(n/2) + {} (linear divide via `{}`)",
-                callee_bound, callee_name,
-            ),
-            "pivot/split produces balanced partitions in expectation".to_string(),
-        ],
+        diagnostics,
+        assumptions,
     })
+}
+
+fn parse_bound_class(s: &str) -> Option<BoundClass> {
+    // Map the textual amortized_bound coming out of pass 1 onto BoundClass.
+    // We intentionally treat any non-constant linear-shaped bound (e.g.
+    // `O(n)`, `O(last)`, `O(arg2)`) as `Linear` — the variable name is
+    // symbolic and the polynomial degree is what matters here.
+    if !s.starts_with("O(") || !s.ends_with(')') {
+        return None;
+    }
+    let inner = &s[2..s.len() - 1];
+    let inner = inner.trim();
+    if inner == "1" {
+        return Some(BoundClass::Constant);
+    }
+    if inner == "log n" || inner == "log(n)" {
+        return Some(BoundClass::Logarithmic);
+    }
+    if inner == "n log n" {
+        return Some(BoundClass::NLogN);
+    }
+    if let Some(rest) = inner.strip_prefix("n^") {
+        if let Ok(k) = rest.parse::<u32>() {
+            return if k >= 2 {
+                Some(BoundClass::Polynomial(k))
+            } else if k == 1 {
+                Some(BoundClass::Linear)
+            } else {
+                Some(BoundClass::Constant)
+            };
+        }
+    }
+    if inner == "?" {
+        return None;
+    }
+    // Anything else with a single symbolic identifier (e.g. `last`, `arg2`)
+    // is treated as linear in that symbol.
+    Some(BoundClass::Linear)
 }
 
 pub fn analyze_function<S: IntegerLinearSolver>(
