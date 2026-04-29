@@ -372,6 +372,11 @@ mod rustc_collector {
                         if let Some(event) = range_aggregate_event(tcx, bb, rvalue, local_names) {
                             events.push(event);
                         }
+                        if let Some(event) =
+                            cast_event_for_rvalue(bb, *target, rvalue, local_names)
+                        {
+                            events.push(event);
+                        }
                         transfer_assignment(tcx, body, self_local, &mut state, *target, rvalue);
                     }
                     _ => {}
@@ -380,7 +385,12 @@ mod rustc_collector {
 
             if let Some(term) = &data.terminator {
                 match &term.kind {
-                    TerminatorKind::Call { func, args, .. } => {
+                    TerminatorKind::Call {
+                        func,
+                        args,
+                        destination,
+                        ..
+                    } => {
                         if let Some(call) = call_event_for_terminator(
                             tcx,
                             body,
@@ -390,6 +400,7 @@ mod rustc_collector {
                             func,
                             args,
                             local_names,
+                            destination,
                         ) {
                             events.push(Event::Call(call));
                         } else {
@@ -475,6 +486,7 @@ mod rustc_collector {
         func: &Operand<'tcx>,
         args: &[Spanned<Operand<'tcx>>],
         local_names: &BTreeMap<Local, String>,
+        destination: &Place<'tcx>,
     ) -> Option<CallEvent> {
         let callee_def_id = callee_def_id(tcx, body, func)?;
         let callee = tcx.def_path_str(callee_def_id);
@@ -492,6 +504,13 @@ mod rustc_collector {
             .map(|arg| access_kind_for_ty(arg.ty(&body.local_decls, tcx)))
             .unwrap_or(AccessKind::Unknown);
 
+        let destination_name = destination.projection.is_empty().then(|| {
+            local_names
+                .get(&destination.local)
+                .cloned()
+                .unwrap_or_else(|| format!("_{}", destination.local.as_usize()))
+        });
+
         Some(CallEvent {
             block: bb.index(),
             callee,
@@ -508,6 +527,40 @@ mod rustc_collector {
                 .opt_associated_item(callee_def_id)
                 .and_then(|item| item.trait_container(tcx))
                 .is_some(),
+            destination: destination_name,
+        })
+    }
+
+    /// Emit `Event::Cast` when an MIR statement assigns a `Cast` rvalue to a
+    /// debug-named local. We only record casts whose source and target are both
+    /// simple debug-named locals — that's what the loop-bound classifier needs
+    /// to follow `let x = call() as usize;` chains.
+    fn cast_event_for_rvalue<'tcx>(
+        bb: BasicBlock,
+        target: Place<'tcx>,
+        rvalue: &Rvalue<'tcx>,
+        local_names: &BTreeMap<Local, String>,
+    ) -> Option<Event> {
+        let Rvalue::Cast(_, source, _) = rvalue else {
+            return None;
+        };
+        if !target.projection.is_empty() {
+            return None;
+        }
+        let source_local = match source {
+            Operand::Copy(p) | Operand::Move(p) if p.projection.is_empty() => p.local,
+            _ => return None,
+        };
+        let name_or_index = |l: Local| {
+            local_names
+                .get(&l)
+                .cloned()
+                .unwrap_or_else(|| format!("_{}", l.as_usize()))
+        };
+        Some(Event::Cast {
+            block: bb.index(),
+            from: name_or_index(source_local),
+            to: name_or_index(target.local),
         })
     }
 
@@ -542,6 +595,7 @@ mod rustc_collector {
             receiver_access: AccessKind::Unknown,
             args: fields.iter().map(|op| format_operand_arg(op, local_names)).collect(),
             is_trait_call: false,
+            destination: None,
         }))
     }
 

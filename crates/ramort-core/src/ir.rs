@@ -97,6 +97,13 @@ pub enum Event {
     Call(CallEvent),
     Assign(AssignEvent),
     Branch(BranchEvent),
+    /// `dst = src as <type>` — propagates a local through a numeric cast.
+    /// Used by analysis to follow `let x = some_call() as usize;` chains.
+    Cast {
+        block: usize,
+        from: String,
+        to: String,
+    },
     Return {
         block: usize,
     },
@@ -120,6 +127,7 @@ impl Event {
             Event::Call(e) => e.block,
             Event::Assign(e) => e.block,
             Event::Branch(e) => e.block,
+            Event::Cast { block, .. } => *block,
             Event::Return { block } => *block,
             Event::Unsafe { block, .. } => *block,
             Event::Drop { block, .. } => *block,
@@ -138,6 +146,11 @@ pub struct CallEvent {
     pub receiver_access: AccessKind,
     pub args: Vec<String>,
     pub is_trait_call: bool,
+    /// Local name the call's return value is written to, when the destination
+    /// is a simple debug-named local. Used to follow chains like
+    /// `let x = foo() as usize;` for loop-bound classification.
+    #[serde(default)]
+    pub destination: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

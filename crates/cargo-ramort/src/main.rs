@@ -120,6 +120,7 @@ fn analyze_demo(
                     receiver_access: AccessKind::MutBorrow,
                     args: vec![],
                     is_trait_call: false,
+                    destination: None,
                 })],
             },
             FunctionIr {
@@ -141,6 +142,7 @@ fn analyze_demo(
                         receiver_access: AccessKind::SharedBorrow,
                         args: vec![],
                         is_trait_call: false,
+                        destination: None,
                     }),
                     Event::Call(CallEvent {
                         block: 1,
@@ -151,6 +153,7 @@ fn analyze_demo(
                         receiver_access: AccessKind::MutBorrow,
                         args: vec![],
                         is_trait_call: false,
+                        destination: None,
                     }),
                     Event::Call(CallEvent {
                         block: 2,
@@ -161,6 +164,7 @@ fn analyze_demo(
                         receiver_access: AccessKind::MutBorrow,
                         args: vec![],
                         is_trait_call: false,
+                        destination: None,
                     }),
                     Event::Call(CallEvent {
                         block: 3,
@@ -171,6 +175,7 @@ fn analyze_demo(
                         receiver_access: AccessKind::MutBorrow,
                         args: vec![],
                         is_trait_call: false,
+                        destination: None,
                     }),
                 ],
             },

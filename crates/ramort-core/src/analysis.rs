@@ -3,7 +3,7 @@ use crate::constraints::generate_potential_constraints;
 use crate::diagnostics::diagnostics_for_failed_obligations;
 use crate::expr::LinExpr;
 use crate::interproc::{FunctionSummary, InterprocSummaryDb};
-use crate::ir::{Event, FunctionIr, ProgramIr, ResourcePath};
+use crate::ir::{CallEvent, Event, FunctionIr, ProgramIr, ResourcePath};
 use crate::loop_summary::infer_draining_loop;
 use crate::lp::{IntegerLinearSolver, LinearProblem};
 use crate::obligation::{verify_candidate, Obligation, PotentialTemplate};
@@ -102,7 +102,7 @@ fn try_solve_recurrence(f: &FunctionIr, reports: &[MethodReport]) -> Option<Meth
     let branches = f
         .events
         .iter()
-        .filter(|e| matches!(e, Event::Call(c) if c.method == f.name))
+        .filter(|e| matches!(e, Event::Call(c) if is_self_call(c, f)))
         .count() as u32;
     if branches == 0 {
         return None;
@@ -114,7 +114,7 @@ fn try_solve_recurrence(f: &FunctionIr, reports: &[MethodReport]) -> Option<Meth
         let Event::Call(c) = event else {
             continue;
         };
-        if c.method == f.name {
+        if is_self_call(c, f) {
             continue;
         }
         let Some(report) = reports.iter().find(|r| {
@@ -409,6 +409,14 @@ pub fn analyze_function<S: IntegerLinearSolver>(
     }
 }
 
+/// True iff `call` is a self-recursive invocation of `f`.
+///
+/// Compares the callee path rather than just the method's last segment so that
+/// `Complex::floor` calling `f64::floor` is not mistaken for self-recursion.
+fn is_self_call(call: &CallEvent, f: &FunctionIr) -> bool {
+    call.callee == f.name || call.callee == f.full_name()
+}
+
 fn collect_resource_paths(f: &FunctionIr) -> Vec<ResourcePath> {
     let mut out = Vec::new();
     for e in &f.events {
@@ -429,7 +437,17 @@ fn analyze_scalar_control_flow(
     policy_status: Status,
     mut diagnostics: Vec<Diagnostic>,
 ) -> Option<MethodReport> {
-    if !has_no_resources {
+    // Original gate: only run scalar analysis when no resources were tracked.
+    // Relaxation: also run when the function is trivially scalar (no loops,
+    // no Unknown / Unsafe events) — this lets methods like `Complex::floor`
+    // that *call* methods on `self.re` (creating receiver-tracked paths) but
+    // do no resource manipulation still be reported as `O(1)`.
+    let trivial_scalar = f.loops.is_empty()
+        && !f
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::Unknown { .. } | Event::Unsafe { .. }));
+    if !has_no_resources && !trivial_scalar {
         return None;
     }
 
@@ -464,7 +482,7 @@ fn analyze_scalar_control_flow(
     }
 
     let (bound, assumption) = if f.loops.is_empty() {
-        if f.events.iter().any(|e| matches!(e, Event::Call(c) if c.method == f.name)) {
+        if f.events.iter().any(|e| matches!(e, Event::Call(c) if is_self_call(c, f))) {
             diagnostics.push(Diagnostic::warn(
                 "recursive function; intraprocedural analysis cannot determine bound".to_string(),
             ));
@@ -487,6 +505,9 @@ fn analyze_scalar_control_flow(
             bound,
             "single Rust range loop with scalar constant-cost body".to_string(),
         )
+    } else if let Some(report) = analyze_nested_loops(f, policy_status.clone(), diagnostics.clone())
+    {
+        return Some(report);
     } else {
         diagnostics.push(Diagnostic::warn(
             "loop shape is not a recognized scalar Rust range loop".to_string(),
@@ -515,6 +536,309 @@ fn analyze_scalar_control_flow(
         diagnostics,
         assumptions: vec![assumption],
     })
+}
+
+/// Multi-loop fallback: build a loop-nesting tree from block-range
+/// containment, classify each loop's bound as a `BoundClass`, then combine —
+/// nested loops multiply, sibling loops take the max.
+///
+/// `BoundClass` operations live in [`crate::recurrence`]: `combine_nested`
+/// multiplies (a factor of `n` × another factor of `n` = `n^2`, etc.), `max`
+/// is just the `Ord` impl.
+fn analyze_nested_loops(
+    f: &FunctionIr,
+    policy_status: Status,
+    mut diagnostics: Vec<Diagnostic>,
+) -> Option<MethodReport> {
+    if f.loops.is_empty() {
+        return None;
+    }
+
+    // Deduplicate loops by header — multiple back-edges to the same header are
+    // one logical loop. Keep the largest extent (footer) per header.
+    let mut headers: std::collections::BTreeMap<usize, (usize, usize)> =
+        std::collections::BTreeMap::new();
+    for region in &f.loops {
+        let Some(&header) = region.blocks.first() else {
+            continue;
+        };
+        let footer = *region.blocks.last().unwrap_or(&header);
+        headers
+            .entry(header)
+            .and_modify(|(_, ft)| {
+                if footer > *ft {
+                    *ft = footer;
+                }
+            })
+            .or_insert((header, footer));
+    }
+
+    // Filter to user-level for-loops: a real Rust `for` loop has an
+    // `Iterator::next` call event at its header block. CFG back-edges from
+    // drop glue, panic handlers, or inlined helpers don't have one.
+    let header_has_next = |bb: usize| {
+        f.events.iter().any(|e| {
+            matches!(e,
+                Event::Call(c) if c.block == bb && c.method == "next" && c.callee.contains("Iterator"))
+        })
+    };
+    headers.retain(|&h, _| header_has_next(h));
+
+    if headers.is_empty() {
+        return None;
+    }
+
+    // Build nesting tree: A is inside B iff A's range is strictly contained in
+    // B's. With n loops, an O(n^2) sweep is fine (n is small).
+    let mut loop_list: Vec<LoopInfo> = headers
+        .values()
+        .map(|&(h, ft)| LoopInfo {
+            header: h,
+            footer: ft,
+            children: Vec::new(),
+            parent: None,
+            bound: BoundClass::Linear, // filled in below
+            bound_label: String::new(),
+        })
+        .collect();
+    loop_list.sort_by_key(|l| l.header);
+
+    let n = loop_list.len();
+    for i in 0..n {
+        for j in 0..n {
+            if i == j {
+                continue;
+            }
+            // i contained in j?
+            let (ih, ifoot) = (loop_list[i].header, loop_list[i].footer);
+            let (jh, jfoot) = (loop_list[j].header, loop_list[j].footer);
+            if jh < ih && jfoot > ifoot {
+                // j contains i; pick the *tightest* (smallest range) such j as parent.
+                let prev = loop_list[i].parent;
+                let prev_size = prev
+                    .map(|p| loop_list[p].footer - loop_list[p].header)
+                    .unwrap_or(usize::MAX);
+                let new_size = jfoot - jh;
+                if new_size < prev_size {
+                    loop_list[i].parent = Some(j);
+                }
+            }
+        }
+    }
+    for i in 0..n {
+        if let Some(p) = loop_list[i].parent {
+            loop_list[p].children.push(i);
+        }
+    }
+
+    // Classify each loop's bound. A loop's bound comes from the closest
+    // `Range::new` event whose block lies in [header-3, header]; that
+    // tolerates the small block-distance between a Range aggregate / new()
+    // call and the loop header (Iterator::next).
+    let log_locals = collect_log_producing_locals(f);
+    for li in &mut loop_list {
+        let (cls, label) = classify_loop_bound(f, li.header, &log_locals)
+            .unwrap_or((BoundClass::Linear, "n".to_string()));
+        li.bound = cls;
+        li.bound_label = label;
+    }
+
+    // Combine: each top-level loop contributes (its bound × its subtree
+    // body-cost). Function bound = max over top-level loops.
+    fn subtree_cost(loops: &[LoopInfo], idx: usize) -> BoundClass {
+        let li = &loops[idx];
+        let body = if li.children.is_empty() {
+            BoundClass::Constant
+        } else {
+            li.children
+                .iter()
+                .map(|&c| subtree_cost(loops, c))
+                .max()
+                .unwrap_or(BoundClass::Constant)
+        };
+        combine_nested(li.bound, body)
+    }
+
+    let mut total = BoundClass::Constant;
+    let mut top_level_count = 0;
+    for i in 0..n {
+        if loop_list[i].parent.is_none() {
+            top_level_count += 1;
+            let cost = subtree_cost(&loop_list, i);
+            if cost > total {
+                total = cost;
+            }
+        }
+    }
+
+    if total == BoundClass::Constant {
+        // No interesting bound found (every loop bound was unrecognized).
+        return None;
+    }
+
+    let derivation = render_loop_tree(&loop_list);
+    diagnostics.push(Diagnostic::info(format!(
+        "nested-loop bound: {} (max over {} top-level loop{})",
+        total,
+        top_level_count,
+        if top_level_count == 1 { "" } else { "s" }
+    )));
+
+    let status = if policy_status == Status::Partial {
+        Status::Partial
+    } else {
+        Status::Partial // bound rests on per-loop classifications, not exact verification
+    };
+
+    Some(MethodReport {
+        method: f.full_name(),
+        status,
+        amortized_bound: total.to_string(),
+        potential: None,
+        obligations: vec![],
+        diagnostics,
+        assumptions: vec![
+            format!("nested-loop derivation: {derivation}"),
+            "loop bounds classified by Range::new arg + ilog2 chain; not exactly verified"
+                .to_string(),
+        ],
+    })
+}
+
+#[derive(Debug, Clone)]
+struct LoopInfo {
+    header: usize,
+    footer: usize,
+    children: Vec<usize>,
+    parent: Option<usize>,
+    bound: BoundClass,
+    bound_label: String,
+}
+
+/// Multiply two `BoundClass`es as if nesting one loop inside another.
+/// `O(n) × O(n) = O(n^2)`, `O(n) × O(log n) = O(n log n)`, etc.
+fn combine_nested(outer: BoundClass, inner: BoundClass) -> BoundClass {
+    use BoundClass::*;
+    match (outer, inner) {
+        (Constant, x) | (x, Constant) => x,
+        (Logarithmic, Logarithmic) => Logarithmic, // O((log n)^2) — coarsen to O(log n) for our enum
+        (Logarithmic, Linear) | (Linear, Logarithmic) => NLogN,
+        (Logarithmic, NLogN) | (NLogN, Logarithmic) => NLogN, // coarse: O(n log^2 n) ≈ O(n log n)
+        (Logarithmic, Polynomial(k)) | (Polynomial(k), Logarithmic) => Polynomial(k),
+        (Linear, Linear) => Polynomial(2),
+        (Linear, NLogN) | (NLogN, Linear) => Polynomial(2), // coarse: drop the log factor
+        (Linear, Polynomial(k)) | (Polynomial(k), Linear) => Polynomial(k + 1),
+        (NLogN, NLogN) => Polynomial(2), // coarse
+        (NLogN, Polynomial(k)) | (Polynomial(k), NLogN) => Polynomial(k + 1),
+        (Polynomial(a), Polynomial(b)) => Polynomial(a + b),
+    }
+}
+
+fn render_loop_tree(loops: &[LoopInfo]) -> String {
+    fn render(loops: &[LoopInfo], idx: usize, out: &mut String) {
+        out.push_str(&format!("{}[{}]", loops[idx].bound, loops[idx].bound_label));
+        let kids = &loops[idx].children;
+        if !kids.is_empty() {
+            out.push('{');
+            for (i, &c) in kids.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                render(loops, c, out);
+            }
+            out.push('}');
+        }
+    }
+    let mut out = String::new();
+    let mut first = true;
+    for i in 0..loops.len() {
+        if loops[i].parent.is_none() {
+            if !first {
+                out.push_str(" + ");
+            }
+            first = false;
+            render(loops, i, &mut out);
+        }
+    }
+    out
+}
+
+/// Locals whose values are produced by an `ilog2`-family call. Includes
+/// targets of `Event::Cast` chains so `let x = n.ilog2() as usize;` is tracked.
+fn collect_log_producing_locals(f: &FunctionIr) -> std::collections::BTreeSet<String> {
+    let mut log_locals = std::collections::BTreeSet::new();
+    let is_log_call =
+        |c: &CallEvent| matches!(c.method.as_str(), "ilog2" | "ilog10" | "log2" | "log10");
+    // Walk events in order: log-call destinations seed the set, casts propagate.
+    for event in &f.events {
+        match event {
+            Event::Call(c) if is_log_call(c) => {
+                if let Some(dest) = &c.destination {
+                    log_locals.insert(dest.clone());
+                }
+            }
+            Event::Cast { from, to, .. } => {
+                if log_locals.contains(from) {
+                    log_locals.insert(to.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    log_locals
+}
+
+/// Classify the bound expression of the loop whose header block is `header_bb`.
+/// Returns `(bound class, human-readable label)`.
+fn classify_loop_bound(
+    f: &FunctionIr,
+    header_bb: usize,
+    log_locals: &std::collections::BTreeSet<String>,
+) -> Option<(BoundClass, String)> {
+    // Most recent Range::new emitted at or before the loop header. We don't
+    // bound the look-back distance: MIR can place the Range::new aggregate
+    // many blocks before the matching Iterator::next when the body is large.
+    // The header_has_next filter already guarantees this header is a real
+    // for-loop, so the most recent Range::new walking backward is its setup.
+    let range_new = f
+        .events
+        .iter()
+        .rev()
+        .filter_map(|event| match event {
+            Event::Call(c) => Some(c),
+            _ => None,
+        })
+        .filter(|c| {
+            c.method == "new"
+                && (c.callee.contains("std::ops::Range")
+                    || c.callee.contains("std::ops::RangeInclusive"))
+                && c.block <= header_bb
+        })
+        .next()?;
+
+    let bound_arg = range_new.args.last()?;
+    let label = strip_operand_prefix(bound_arg).to_string();
+
+    // Logarithmic if the bound is a known log-producing local.
+    if log_locals.contains(&label) {
+        return Some((BoundClass::Logarithmic, label));
+    }
+    // Constant if the bound parses as an integer literal.
+    if parse_rust_integer_literal(strip_operand_prefix(bound_arg)).is_some() {
+        return Some((BoundClass::Constant, label));
+    }
+    // Otherwise treat as linear in the symbolic bound.
+    Some((BoundClass::Linear, label))
+}
+
+fn strip_operand_prefix(s: &str) -> &str {
+    let s = s.trim();
+    for prefix in ["copy ", "move ", "const "] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            return rest.trim();
+        }
+    }
+    s
 }
 
 fn infer_single_range_loop_bound(f: &FunctionIr) -> Option<LinExpr> {
@@ -785,6 +1109,7 @@ mod tests {
             receiver_access: AccessKind::Unknown,
             args: args.iter().map(|arg| (*arg).into()).collect(),
             is_trait_call: false,
+            destination: None,
         })
     }
 
@@ -825,6 +1150,7 @@ mod tests {
             receiver_access,
             args: vec![],
             is_trait_call: false,
+            destination: None,
         })
     }
 }

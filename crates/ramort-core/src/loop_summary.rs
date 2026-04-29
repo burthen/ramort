@@ -85,6 +85,7 @@ mod tests {
                 receiver_access: AccessKind::MutBorrow,
                 args: vec![],
                 is_trait_call: false,
+                destination: None,
             }),
             Event::Call(CallEvent {
                 block: 2,
@@ -95,6 +96,7 @@ mod tests {
                 receiver_access: AccessKind::MutBorrow,
                 args: vec![],
                 is_trait_call: false,
+                destination: None,
             }),
             Event::Call(CallEvent {
                 block: 3,
@@ -105,6 +107,7 @@ mod tests {
                 receiver_access: AccessKind::MutBorrow,
                 args: vec![],
                 is_trait_call: false,
+                destination: None,
             }),
         ];
         let before = AbstractState::default()
