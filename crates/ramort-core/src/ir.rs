@@ -104,6 +104,19 @@ pub enum Event {
         from: String,
         to: String,
     },
+    /// `target = lhs <op> <rhs>` for a primitive `Rvalue::BinaryOp`. We only
+    /// record arithmetic / shift ops (Add, Sub, Mul, Div, Rem, Shl, Shr) — the
+    /// shape needed for ranking-function-style loop bound classification (e.g.
+    /// "this local is halved in the loop body, so the bound is logarithmic").
+    /// `rhs_const` is `Some(n)` only when the right-hand side is an integer
+    /// literal; arbitrary local-on-local ops carry `None`.
+    Binop {
+        block: usize,
+        op: String,
+        target: Option<String>,
+        lhs: Option<String>,
+        rhs_const: Option<i64>,
+    },
     Return {
         block: usize,
     },
@@ -128,6 +141,7 @@ impl Event {
             Event::Assign(e) => e.block,
             Event::Branch(e) => e.block,
             Event::Cast { block, .. } => *block,
+            Event::Binop { block, .. } => *block,
             Event::Return { block } => *block,
             Event::Unsafe { block, .. } => *block,
             Event::Drop { block, .. } => *block,

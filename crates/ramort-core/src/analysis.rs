@@ -508,6 +508,10 @@ fn analyze_scalar_control_flow(
     } else if let Some(report) = analyze_nested_loops(f, policy_status.clone(), diagnostics.clone())
     {
         return Some(report);
+    } else if let Some(report) =
+        analyze_halving_while_loop(f, policy_status.clone(), diagnostics.clone())
+    {
+        return Some(report);
     } else {
         diagnostics.push(Diagnostic::warn(
             "loop shape is not a recognized scalar Rust range loop".to_string(),
@@ -839,6 +843,91 @@ fn strip_operand_prefix(s: &str) -> &str {
         }
     }
     s
+}
+
+/// Recognize a `while` loop whose body halves a control variable (the
+/// `degree /= 2` shape in `pow/main.rs::power_log`) and report `O(log n)`.
+///
+/// Pattern (heuristic, not a proof):
+///   - the function has at least one IR loop region (back-edge in CFG), AND
+///   - inside that loop's block range there is a `Binop` event with
+///     `op = "Div" | "Shr"` and `rhs_const >= 2` writing back to a local —
+///     i.e. an in-place halving step.
+///
+/// The bound variable is the halved local. Status is `Partial` because the
+/// detector doesn't verify that *every* iteration path makes progress;
+/// programs that halve only on one branch and idle on another won't terminate
+/// but will still match the pattern.
+fn analyze_halving_while_loop(
+    f: &FunctionIr,
+    policy_status: Status,
+    mut diagnostics: Vec<Diagnostic>,
+) -> Option<MethodReport> {
+    if f.loops.is_empty() {
+        return None;
+    }
+    // Don't fire if there's any for-loop in the function: those are handled
+    // upstream and a halving inside one of them would be a different shape.
+    let has_for_loop = f.events.iter().any(|e| {
+        matches!(e, Event::Call(c) if c.method == "next" && c.callee.contains("Iterator"))
+    });
+    if has_for_loop {
+        return None;
+    }
+
+    // Find a halving binop inside any loop region.
+    for region in &f.loops {
+        for event in &f.events {
+            let Event::Binop {
+                block,
+                op,
+                target,
+                rhs_const,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            if !region.blocks.contains(block) {
+                continue;
+            }
+            let halves = matches!(op.as_str(), "Div" | "Shr") && rhs_const.unwrap_or(0) >= 2;
+            if !halves {
+                continue;
+            }
+            let var = target.clone().unwrap_or_else(|| "n".to_string());
+
+            diagnostics.push(Diagnostic::info(format!(
+                "halving step found: {var} {} {} (in loop block {})",
+                if op == "Div" { "/=" } else { ">>=" },
+                rhs_const.unwrap_or(2),
+                block,
+            )));
+
+            let status = if policy_status == Status::Partial {
+                Status::Partial
+            } else {
+                Status::Partial
+            };
+
+            return Some(MethodReport {
+                method: f.full_name(),
+                status,
+                amortized_bound: format!("O(log {var})"),
+                potential: None,
+                obligations: vec![],
+                diagnostics,
+                assumptions: vec![
+                    format!(
+                        "while-loop with halving step on `{var}`; iteration count bounded by log2({var}_initial)"
+                    ),
+                    "soundness assumes every iteration makes progress (halve or decrement); not exactly verified"
+                        .to_string(),
+                ],
+            });
+        }
+    }
+    None
 }
 
 fn infer_single_range_loop_bound(f: &FunctionIr) -> Option<LinExpr> {

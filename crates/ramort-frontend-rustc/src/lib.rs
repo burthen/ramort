@@ -48,8 +48,8 @@ mod rustc_collector {
     use rustc_hir::def_id::{LocalDefId, LOCAL_CRATE};
     use rustc_interface::interface;
     use rustc_middle::mir::{
-        AggregateKind, BasicBlock, Body, BorrowKind, Local, Operand, Place, ProjectionElem, Rvalue,
-        StatementKind, TerminatorKind, VarDebugInfoContents,
+        AggregateKind, BasicBlock, BinOp, Body, BorrowKind, Local, Operand, Place, ProjectionElem,
+        Rvalue, StatementKind, TerminatorKind, VarDebugInfoContents,
     };
     use rustc_middle::ty::{Ty, TyCtxt, TyKind};
     use rustc_span::Spanned;
@@ -377,6 +377,11 @@ mod rustc_collector {
                         {
                             events.push(event);
                         }
+                        if let Some(event) =
+                            binop_event_for_rvalue(bb, *target, rvalue, local_names)
+                        {
+                            events.push(event);
+                        }
                         transfer_assignment(tcx, body, self_local, &mut state, *target, rvalue);
                     }
                     _ => {}
@@ -535,6 +540,69 @@ mod rustc_collector {
     /// debug-named local. We only record casts whose source and target are both
     /// simple debug-named locals — that's what the loop-bound classifier needs
     /// to follow `let x = call() as usize;` chains.
+    /// Emit `Event::Binop` for arithmetic/shift `Rvalue::BinaryOp` writes to a
+    /// debug-named (or unnamed `_N`) local. Only records the ops the analysis
+    /// uses for ranking-function classification: Add, Sub, Mul, Div, Rem, Shl,
+    /// Shr. Comparison binops (Eq, Lt, …) are intentionally skipped — they
+    /// produce booleans, not numeric monovariants.
+    fn binop_event_for_rvalue<'tcx>(
+        bb: BasicBlock,
+        target: Place<'tcx>,
+        rvalue: &Rvalue<'tcx>,
+        local_names: &BTreeMap<Local, String>,
+    ) -> Option<Event> {
+        let Rvalue::BinaryOp(op, operands) = rvalue else {
+            return None;
+        };
+        let op_name = match op {
+            BinOp::Add | BinOp::AddUnchecked => "Add",
+            BinOp::Sub | BinOp::SubUnchecked => "Sub",
+            BinOp::Mul | BinOp::MulUnchecked => "Mul",
+            BinOp::Div => "Div",
+            BinOp::Rem => "Rem",
+            BinOp::Shl | BinOp::ShlUnchecked => "Shl",
+            BinOp::Shr | BinOp::ShrUnchecked => "Shr",
+            _ => return None,
+        };
+        if !target.projection.is_empty() {
+            return None;
+        }
+        let (lhs_op, rhs_op) = (&operands.0, &operands.1);
+        let local_label = |l: Local| {
+            local_names
+                .get(&l)
+                .cloned()
+                .unwrap_or_else(|| format!("_{}", l.as_usize()))
+        };
+        let operand_local = |op: &Operand<'tcx>| match op {
+            Operand::Copy(p) | Operand::Move(p) if p.projection.is_empty() => Some(p.local),
+            _ => None,
+        };
+        // Parse the constant by formatting and reading the leading integer.
+        // MIR pretty-print emits e.g. `const 2_u32`, `const 1_usize`. This
+        // avoids depending on the version-fragile `try_to_scalar_int` API.
+        let operand_int = |op: &Operand<'tcx>| -> Option<i64> {
+            if !matches!(op, Operand::Constant(_)) {
+                return None;
+            }
+            let raw = format!("{op:?}");
+            let s = raw.trim().strip_prefix("const ").unwrap_or(raw.trim());
+            let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if digits.is_empty() {
+                None
+            } else {
+                digits.parse().ok()
+            }
+        };
+        Some(Event::Binop {
+            block: bb.index(),
+            op: op_name.to_string(),
+            target: Some(local_label(target.local)),
+            lhs: operand_local(lhs_op).map(local_label),
+            rhs_const: operand_int(rhs_op),
+        })
+    }
+
     fn cast_event_for_rvalue<'tcx>(
         bb: BasicBlock,
         target: Place<'tcx>,
