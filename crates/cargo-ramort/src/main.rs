@@ -111,6 +111,7 @@ fn analyze_demo(
                 },
                 blocks: 1,
                 loops: vec![],
+                successors: vec![],
                 events: vec![Event::Call(CallEvent {
                     block: 0,
                     callee: "alloc::vec::Vec::push".into(),
@@ -132,6 +133,7 @@ fn analyze_demo(
                 },
                 blocks: 4,
                 loops: vec![LoopRegion { blocks: vec![1, 2] }],
+                successors: vec![],
                 events: vec![
                     Event::Call(CallEvent {
                         block: 0,

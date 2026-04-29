@@ -8,6 +8,7 @@ use crate::loop_summary::infer_draining_loop;
 use crate::lp::{IntegerLinearSolver, LinearProblem};
 use crate::obligation::{verify_candidate, Obligation, PotentialTemplate};
 use crate::policy::SoundnessPolicy;
+use crate::ranking::{find_ranking_function, RankingClass};
 use crate::recurrence::{BoundClass, BranchShape, Recurrence, SolveRule};
 use crate::report::{AnalysisReport, Diagnostic, MethodReport, Status};
 use crate::summary::SummaryDb;
@@ -186,6 +187,7 @@ fn try_solve_recurrence(f: &FunctionIr, reports: &[MethodReport]) -> Option<Meth
         obligations: vec![],
         diagnostics,
         assumptions,
+        bound_legend: vec![],
     })
 }
 
@@ -337,6 +339,7 @@ pub fn analyze_function<S: IntegerLinearSolver>(
                 diagnostics
             },
             assumptions: vec![],
+            bound_legend: vec![],
         };
     }
 
@@ -395,6 +398,7 @@ pub fn analyze_function<S: IntegerLinearSolver>(
                 assumptions: vec![
                     "potential inferred by integer LP; exact verification performed".into(),
                 ],
+                bound_legend: vec![],
             }
         }
         Err(e) => MethodReport {
@@ -405,6 +409,7 @@ pub fn analyze_function<S: IntegerLinearSolver>(
             obligations: vec![],
             diagnostics: vec![Diagnostic::error(format!("solver failed: {e}"))],
             assumptions: vec![],
+            bound_legend: vec![],
         },
     }
 }
@@ -460,6 +465,7 @@ fn analyze_scalar_control_flow(
             obligations: vec![],
             diagnostics,
             assumptions: vec![],
+            bound_legend: vec![],
         });
     }
 
@@ -478,6 +484,7 @@ fn analyze_scalar_control_flow(
             obligations: vec![],
             diagnostics,
             assumptions: vec![],
+            bound_legend: vec![],
         });
     }
 
@@ -494,6 +501,7 @@ fn analyze_scalar_control_flow(
                 obligations: vec![],
                 diagnostics,
                 assumptions: vec![],
+                bound_legend: vec![],
             });
         }
         (
@@ -509,7 +517,7 @@ fn analyze_scalar_control_flow(
     {
         return Some(report);
     } else if let Some(report) =
-        analyze_halving_while_loop(f, policy_status.clone(), diagnostics.clone())
+        analyze_via_ranking(f, policy_status.clone(), diagnostics.clone())
     {
         return Some(report);
     } else {
@@ -524,9 +532,12 @@ fn analyze_scalar_control_flow(
             obligations: vec![],
             diagnostics,
             assumptions: vec![],
+            bound_legend: vec![],
         });
     };
 
+    let raw_bound = bound.to_big_o();
+    let (canonical_bound, bound_legend) = canonicalize_bound(&raw_bound, &bound);
     Some(MethodReport {
         method: f.full_name(),
         status: if policy_status == Status::Partial {
@@ -534,11 +545,12 @@ fn analyze_scalar_control_flow(
         } else {
             Status::Proven
         },
-        amortized_bound: bound.to_big_o(),
+        amortized_bound: canonical_bound,
         potential: Some("0".into()),
         obligations: vec![],
         diagnostics,
         assumptions: vec![assumption],
+        bound_legend,
     })
 }
 
@@ -706,6 +718,7 @@ fn analyze_nested_loops(
             "loop bounds classified by Range::new arg + ilog2 chain; not exactly verified"
                 .to_string(),
         ],
+        bound_legend: vec![],
     })
 }
 
@@ -845,20 +858,41 @@ fn strip_operand_prefix(s: &str) -> &str {
     s
 }
 
-/// Recognize a `while` loop whose body halves a control variable (the
-/// `degree /= 2` shape in `pow/main.rs::power_log`) and report `O(log n)`.
+/// Group `LoopRegion`s by their header (smallest block) and union their
+/// block sets. A function with two back-edges to the same header would
+/// otherwise show up as two distinct regions with different bodies — the
+/// union is the canonical extent of the user-level loop.
+fn merge_regions_by_header(regions: &[crate::ir::LoopRegion]) -> Vec<crate::ir::LoopRegion> {
+    use std::collections::BTreeMap;
+    let mut by_header: BTreeMap<usize, std::collections::BTreeSet<usize>> = BTreeMap::new();
+    for region in regions {
+        let Some(&header) = region.blocks.first() else {
+            continue;
+        };
+        by_header
+            .entry(header)
+            .or_default()
+            .extend(region.blocks.iter().copied());
+    }
+    by_header
+        .into_iter()
+        .map(|(_, blocks)| crate::ir::LoopRegion {
+            blocks: blocks.into_iter().collect(),
+        })
+        .collect()
+}
+
+/// Path-sensitive ranking-function analysis for while-loops.
 ///
-/// Pattern (heuristic, not a proof):
-///   - the function has at least one IR loop region (back-edge in CFG), AND
-///   - inside that loop's block range there is a `Binop` event with
-///     `op = "Div" | "Shr"` and `rhs_const >= 2` writing back to a local —
-///     i.e. an in-place halving step.
+/// Asks [`find_ranking_function`](crate::ranking::find_ranking_function) for a
+/// ranking variable on each loop region. If found, the bound is `O(V)` for a
+/// linear ranking or `O(log V)` for a logarithmic one — where `V` is the
+/// ranking variable's name.
 ///
-/// The bound variable is the halved local. Status is `Partial` because the
-/// detector doesn't verify that *every* iteration path makes progress;
-/// programs that halve only on one branch and idle on another won't terminate
-/// but will still match the pattern.
-fn analyze_halving_while_loop(
+/// Path-sensitivity comes from the function CFG: every cycle through the
+/// loop header must pass through a block that decrements (or halves) `V`.
+/// This subsumes the prior "halving step found anywhere in body" heuristic.
+fn analyze_via_ranking(
     f: &FunctionIr,
     policy_status: Status,
     mut diagnostics: Vec<Diagnostic>,
@@ -866,8 +900,8 @@ fn analyze_halving_while_loop(
     if f.loops.is_empty() {
         return None;
     }
-    // Don't fire if there's any for-loop in the function: those are handled
-    // upstream and a halving inside one of them would be a different shape.
+    // For-loops are handled upstream by `infer_single_range_loop_bound` and
+    // `analyze_nested_loops`. Skip if any user-level `for` is present.
     let has_for_loop = f.events.iter().any(|e| {
         matches!(e, Event::Call(c) if c.method == "next" && c.callee.contains("Iterator"))
     });
@@ -875,59 +909,81 @@ fn analyze_halving_while_loop(
         return None;
     }
 
-    // Find a halving binop inside any loop region.
-    for region in &f.loops {
-        for event in &f.events {
-            let Event::Binop {
-                block,
-                op,
-                target,
-                rhs_const,
-                ..
-            } = event
-            else {
-                continue;
-            };
-            if !region.blocks.contains(block) {
-                continue;
-            }
-            let halves = matches!(op.as_str(), "Div" | "Shr") && rhs_const.unwrap_or(0) >= 2;
-            if !halves {
-                continue;
-            }
-            let var = target.clone().unwrap_or_else(|| "n".to_string());
+    // Merge loop regions sharing a header — one logical loop with multiple
+    // back-edges yields multiple `LoopRegion`s, but the ranking analysis
+    // needs to see the union so progress events on every branch are visible.
+    let merged = merge_regions_by_header(&f.loops);
+    let ranking = merged
+        .iter()
+        .find_map(|region| find_ranking_function(f, region))?;
 
-            diagnostics.push(Diagnostic::info(format!(
-                "halving step found: {var} {} {} (in loop block {})",
-                if op == "Div" { "/=" } else { ">>=" },
-                rhs_const.unwrap_or(2),
-                block,
-            )));
+    // Render the bound in canonical-`n` form. The actual ranking variable's
+    // identity goes into the legend so the reader can resolve `n` back to
+    // `degree` / `count` / etc.
+    let bound = match ranking.class {
+        RankingClass::Linear => "O(n)".to_string(),
+        RankingClass::Logarithmic => "O(log n)".to_string(),
+    };
+    let class_label = match ranking.class {
+        RankingClass::Linear => "linear",
+        RankingClass::Logarithmic => "logarithmic",
+    };
+    let legend = vec![format!("n = `{}` (loop ranking variable)", ranking.variable)];
 
-            let status = if policy_status == Status::Partial {
-                Status::Partial
-            } else {
-                Status::Partial
-            };
+    diagnostics.push(Diagnostic::info(format!(
+        "ranking function: {} ({}); witness: {}",
+        ranking.variable, class_label, ranking.witness
+    )));
 
-            return Some(MethodReport {
-                method: f.full_name(),
-                status,
-                amortized_bound: format!("O(log {var})"),
-                potential: None,
-                obligations: vec![],
-                diagnostics,
-                assumptions: vec![
-                    format!(
-                        "while-loop with halving step on `{var}`; iteration count bounded by log2({var}_initial)"
-                    ),
-                    "soundness assumes every iteration makes progress (halve or decrement); not exactly verified"
-                        .to_string(),
-                ],
-            });
-        }
+    let status = if policy_status == Status::Partial {
+        Status::Partial
+    } else {
+        Status::Partial // path-sensitive ranking is sound for termination but
+                        // we don't yet verify the variable's *initial* value,
+                        // so the bound stays Partial.
+    };
+
+    Some(MethodReport {
+        method: f.full_name(),
+        status,
+        amortized_bound: bound,
+        potential: None,
+        obligations: vec![],
+        diagnostics,
+        assumptions: vec![
+            format!(
+                "ranking function `{}` proves termination via path-sensitive {} decrease",
+                ranking.variable, class_label
+            ),
+            ranking.witness,
+        ],
+        bound_legend: legend,
+    })
+}
+
+/// Rewrite a per-function bound (e.g. `O(degree)`, `O(last)`) into the
+/// canonical `O(n)` form, returning the new string and a legend that records
+/// what `n` actually is. For `O(1)` the legend is empty.
+///
+/// We only canonicalize bounds with exactly one symbolic variable; multi-var
+/// shapes (which `to_big_o` joins with ` + `) are left unchanged for now —
+/// they're rare and would need a multi-symbol legend.
+fn canonicalize_bound(raw: &str, bound: &LinExpr) -> (String, Vec<String>) {
+    if raw == "O(1)" {
+        return (raw.to_string(), Vec::new());
     }
-    None
+    let symbolic_vars: Vec<&String> = bound
+        .terms
+        .keys()
+        .filter(|k| !k.starts_with("a_") && !k.starts_with("c_"))
+        .collect();
+    if symbolic_vars.len() != 1 {
+        return (raw.to_string(), Vec::new());
+    }
+    let var = symbolic_vars[0].as_str();
+    let canonical = raw.replace(var, "n");
+    let legend = vec![format!("n = `{var}` (loop range bound)")];
+    (canonical, legend)
 }
 
 fn infer_single_range_loop_bound(f: &FunctionIr) -> Option<LinExpr> {
@@ -1057,6 +1113,7 @@ mod tests {
             signature: FunctionSignature::default(),
             blocks: 5,
             loops: vec![],
+            successors: vec![],
             events: vec![
                 Event::Branch(crate::ir::BranchEvent {
                     block: 0,
@@ -1092,6 +1149,7 @@ mod tests {
             loops: vec![LoopRegion {
                 blocks: vec![3, 4, 5, 6],
             }],
+            successors: vec![],
             events: vec![
                 scalar_call(
                     0,
@@ -1215,6 +1273,7 @@ mod tests {
             },
             blocks: 4,
             loops: vec![LoopRegion { blocks: vec![1, 2] }],
+            successors: vec![],
             events: vec![
                 vec_call(0, "is_empty", front.clone(), AccessKind::SharedBorrow),
                 vec_call(1, "pop", back, AccessKind::MutBorrow),

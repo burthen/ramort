@@ -166,6 +166,12 @@ fn print_method(method: &MethodReport, method_width: usize, style: TerminalStyle
         style.cyan(method.amortized_bound.as_str()),
     );
 
+    if !method.bound_legend.is_empty() {
+        for entry in &method.bound_legend {
+            println!("  {} {}", style.dim("where:    "), entry);
+        }
+    }
+
     println!(
         "  {} {}",
         style.dim("potential:"),

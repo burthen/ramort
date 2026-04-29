@@ -182,7 +182,20 @@ mod rustc_collector {
             blocks: body.basic_blocks.len(),
             events,
             loops: collect_loop_regions(body),
+            successors: collect_successors(body),
         }
+    }
+
+    fn collect_successors<'tcx>(body: &'tcx Body<'tcx>) -> Vec<Vec<usize>> {
+        body.basic_blocks
+            .iter()
+            .map(|data| {
+                data.terminator
+                    .as_ref()
+                    .map(|term| term.successors().map(|s| s.index()).collect())
+                    .unwrap_or_default()
+            })
+            .collect()
     }
 
     fn owner_type_from_self<'tcx>(
@@ -357,6 +370,15 @@ mod rustc_collector {
     ) -> Vec<Event> {
         let mut events = Vec::new();
 
+        // Tracks tuple temps written by a WithOverflow binop. When a later
+        // statement extracts `.0` of such a temp into a debug-named local, we
+        // synthesize a Binop event targeting that local — debug MIR for `u32`
+        // subtraction goes through a `SubWithOverflow` aggregate, and ranking
+        // analysis needs to see it as a Sub on the user variable.
+        // Map: tuple_temp_local -> (op_name, lhs_label, rhs_const)
+        let mut pending_overflow: BTreeMap<Local, (String, Option<String>, Option<i64>)> =
+            BTreeMap::new();
+
         for (bb, data) in body.basic_blocks.iter_enumerated() {
             let mut state = in_states[bb.index()].clone();
 
@@ -380,6 +402,16 @@ mod rustc_collector {
                         if let Some(event) =
                             binop_event_for_rvalue(bb, *target, rvalue, local_names)
                         {
+                            events.push(event);
+                        }
+                        record_overflow_binop(*target, rvalue, &mut pending_overflow, local_names);
+                        if let Some(event) = unpack_overflow_event(
+                            bb,
+                            *target,
+                            rvalue,
+                            &pending_overflow,
+                            local_names,
+                        ) {
                             events.push(event);
                         }
                         transfer_assignment(tcx, body, self_local, &mut state, *target, rvalue);
@@ -600,6 +632,92 @@ mod rustc_collector {
             target: Some(local_label(target.local)),
             lhs: operand_local(lhs_op).map(local_label),
             rhs_const: operand_int(rhs_op),
+        })
+    }
+
+    /// Record a `*WithOverflow` binop into the pending map keyed by the
+    /// tuple-temp local. The actual `Event::Binop` for the user variable is
+    /// emitted later by `unpack_overflow_event` when `.0` is projected out.
+    fn record_overflow_binop<'tcx>(
+        target: Place<'tcx>,
+        rvalue: &Rvalue<'tcx>,
+        pending: &mut BTreeMap<Local, (String, Option<String>, Option<i64>)>,
+        local_names: &BTreeMap<Local, String>,
+    ) {
+        let Rvalue::BinaryOp(op, operands) = rvalue else {
+            return;
+        };
+        let op_name = match op {
+            BinOp::AddWithOverflow => "Add",
+            BinOp::SubWithOverflow => "Sub",
+            BinOp::MulWithOverflow => "Mul",
+            _ => return,
+        };
+        if !target.projection.is_empty() {
+            return;
+        }
+        let local_label = |l: Local| {
+            local_names
+                .get(&l)
+                .cloned()
+                .unwrap_or_else(|| format!("_{}", l.as_usize()))
+        };
+        let lhs_local = match &operands.0 {
+            Operand::Copy(p) | Operand::Move(p) if p.projection.is_empty() => Some(p.local),
+            _ => None,
+        };
+        let rhs_const = {
+            let raw = format!("{:?}", &operands.1);
+            let s = raw.trim().strip_prefix("const ").unwrap_or(raw.trim());
+            let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+            digits.parse::<i64>().ok()
+        };
+        pending.insert(
+            target.local,
+            (op_name.to_string(), lhs_local.map(local_label), rhs_const),
+        );
+    }
+
+    /// If `target = move (_X.0)` and `_X` is a pending overflow temp, emit a
+    /// synthetic `Event::Binop` whose target is the user-visible local.
+    fn unpack_overflow_event<'tcx>(
+        bb: BasicBlock,
+        target: Place<'tcx>,
+        rvalue: &Rvalue<'tcx>,
+        pending: &BTreeMap<Local, (String, Option<String>, Option<i64>)>,
+        local_names: &BTreeMap<Local, String>,
+    ) -> Option<Event> {
+        if !target.projection.is_empty() {
+            return None;
+        }
+        let Rvalue::Use(Operand::Copy(src) | Operand::Move(src)) = rvalue else {
+            return None;
+        };
+        // Looking for exactly `_X.0` (Field index 0).
+        let mut iter = src.projection.iter();
+        let first = iter.next()?;
+        if iter.next().is_some() {
+            return None;
+        }
+        let ProjectionElem::Field(field, _) = first else {
+            return None;
+        };
+        if field.as_usize() != 0 {
+            return None;
+        }
+        let (op, lhs, rhs_const) = pending.get(&src.local)?.clone();
+        let local_label = |l: Local| {
+            local_names
+                .get(&l)
+                .cloned()
+                .unwrap_or_else(|| format!("_{}", l.as_usize()))
+        };
+        Some(Event::Binop {
+            block: bb.index(),
+            op,
+            target: Some(local_label(target.local)),
+            lhs,
+            rhs_const,
         })
     }
 

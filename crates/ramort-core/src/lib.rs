@@ -30,6 +30,7 @@ pub mod lp;
 pub mod obligation;
 pub mod path_conditions;
 pub mod policy;
+pub mod ranking;
 pub mod recurrence;
 pub mod report;
 pub mod summary;
@@ -46,6 +47,7 @@ pub use ir::{
 };
 pub use lp::{ConstraintOp, IlpSolution, IntegerLinearSolver, LinearProblem, SolverError, VarKind};
 pub use obligation::{verify_candidate, Obligation, VerifiedObligation};
+pub use ranking::{find_ranking_function, RankingClass, RankingFunction};
 pub use recurrence::{BoundClass, BranchShape, Recurrence, SolveError, SolveRule, Solution};
 pub use report::{AnalysisReport, MethodReport, Status};
 pub use summary::{ResourceSummary, SummaryDb, SummaryEffect};

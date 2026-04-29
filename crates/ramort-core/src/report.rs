@@ -44,6 +44,12 @@ pub struct MethodReport {
     pub obligations: Vec<VerifiedObligation>,
     pub diagnostics: Vec<Diagnostic>,
     pub assumptions: Vec<String>,
+    /// Maps canonical bound symbols (e.g. `n`) to what they actually represent
+    /// in this function — usually a parameter name, a loop variable, or a
+    /// derived local. Rendered as a `where:` line below the bound. Empty when
+    /// the bound has no symbolic content (`O(1)`).
+    #[serde(default)]
+    pub bound_legend: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

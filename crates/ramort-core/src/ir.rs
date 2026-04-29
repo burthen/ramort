@@ -69,6 +69,13 @@ pub struct FunctionIr {
     pub blocks: usize,
     pub events: Vec<Event>,
     pub loops: Vec<LoopRegion>,
+    /// Full intraprocedural CFG: `successors[bb]` lists the basic blocks
+    /// reachable directly from block `bb` (a Call's normal-return successor,
+    /// both arms of a SwitchInt, the target of a Goto, etc.). Cleanup /
+    /// unwind successors are included so the CFG stays complete; analyses
+    /// that don't want them filter explicitly.
+    #[serde(default)]
+    pub successors: Vec<Vec<usize>>,
 }
 
 impl FunctionIr {
