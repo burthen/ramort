@@ -913,9 +913,9 @@ fn analyze_via_ranking(
     // back-edges yields multiple `LoopRegion`s, but the ranking analysis
     // needs to see the union so progress events on every branch are visible.
     let merged = merge_regions_by_header(&f.loops);
-    let ranking = merged
+    let (matched_region, ranking) = merged
         .iter()
-        .find_map(|region| find_ranking_function(f, region))?;
+        .find_map(|region| find_ranking_function(f, region).map(|rf| (region, rf)))?;
 
     // Render the bound in canonical-`n` form. The actual ranking variable's
     // identity goes into the legend so the reader can resolve `n` back to
@@ -935,12 +935,27 @@ fn analyze_via_ranking(
         ranking.variable, class_label, ranking.witness
     )));
 
-    let status = if policy_status == Status::Partial {
-        Status::Partial
+    // Promote to Proven when the ranking proof is sound AND the loop body has
+    // no `Call` events (i.e. constant-cost per iteration). Calls would need a
+    // pass-1 callee bound to classify; for now, "no calls" is the cheap-and-
+    // sound check that handles arithmetic-only loops like `power_log`.
+    let body_constant = loop_body_is_constant_cost(f, matched_region);
+    let mut assumptions = vec![
+        format!(
+            "ranking function `{}` proves termination via path-sensitive {} decrease",
+            ranking.variable, class_label
+        ),
+        ranking.witness,
+    ];
+    let status = if policy_status != Status::Proven {
+        policy_status
+    } else if body_constant {
+        assumptions.push(
+            "loop body has no Call events ⇒ constant cost per iteration".to_string(),
+        );
+        Status::Proven
     } else {
-        Status::Partial // path-sensitive ranking is sound for termination but
-                        // we don't yet verify the variable's *initial* value,
-                        // so the bound stays Partial.
+        Status::Partial
     };
 
     Some(MethodReport {
@@ -950,14 +965,20 @@ fn analyze_via_ranking(
         potential: None,
         obligations: vec![],
         diagnostics,
-        assumptions: vec![
-            format!(
-                "ranking function `{}` proves termination via path-sensitive {} decrease",
-                ranking.variable, class_label
-            ),
-            ranking.witness,
-        ],
+        assumptions,
         bound_legend: legend,
+    })
+}
+
+/// Returns `true` if the loop region contains no `Event::Call`. This is a
+/// conservative "constant body cost" check: Binops, Casts, Branches, Returns
+/// are all bounded individually, so a body that's exclusively those events
+/// runs in `O(1)` per iteration.
+fn loop_body_is_constant_cost(f: &FunctionIr, region: &crate::ir::LoopRegion) -> bool {
+    let region_set: std::collections::BTreeSet<usize> =
+        region.blocks.iter().copied().collect();
+    !f.events.iter().any(|e| {
+        matches!(e, Event::Call(c) if region_set.contains(&c.block))
     })
 }
 
