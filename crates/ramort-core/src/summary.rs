@@ -89,6 +89,14 @@ pub struct MatchedSummary {
 }
 
 impl SummaryDb {
+    pub(crate) fn constant_ticks(&self, call: &CallEvent) -> Option<i64> {
+        let summary = self.match_call(call)?;
+        (summary.cost.terms.is_empty()
+            && summary.cost.constant >= 0
+            && summary.partial_unknown.is_none())
+        .then_some(summary.cost.constant)
+    }
+
     pub fn empty() -> Self {
         Self::default()
     }

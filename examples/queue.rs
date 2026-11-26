@@ -13,7 +13,7 @@ impl<T> Queue<T> {
         self.back.push(x);
     }
 
-    #[amortized::cost("1")]
+    #[amortized::cost("3")]
     pub fn pop(&mut self) -> Option<T> {
         if self.front.is_empty() {
             while let Some(x) = self.back.pop() {

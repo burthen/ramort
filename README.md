@@ -48,6 +48,32 @@ Bounds are rendered in canonical form: `O(1)`, `O(log n)`, `O(n)`,
 `O(n log n)`, `O(n^k)`. A `where:` line maps `n` back to the function-local
 identity (e.g. `where: n = ` `` `degree` `` `(loop ranking variable)`).
 
+## Queue cost metric
+
+The queue proof counts abstract library-operation ticks on normally returning
+paths. A call spends its matched summary charge (the amortized charge if
+specified). The bundled Vec model charges one tick each for `is_empty`,
+`push`, and every `pop`, including a pop returning `None`. Only a successful
+pop reduces length. Allocation is covered by the Vec push contract.
+Assignments, branches, casts, primitive arithmetic, and return carry zero
+ticks in this metric. Opaque calls, unsupported drop/unsafe/unknown events,
+and missing or nonconstant summary charges prevent a queue proof.
+
+Let F and B be the nonnegative entry lengths of the front and back stacks.
+With potential Φ = 2B, the following traces account for all calls in
+`examples/queue.rs`. All credit and cost columns are in ticks.
+
+| Entry and operation | Charged calls | Actual | Initial credit | Final credit | Actual + change in credit |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Push | back.push | 1 | 2B | 2B + 2 | 3 |
+| Pop, F > 0 | front.is_empty, front.pop | 2 | 2B | 2B | 2 |
+| Pop, F = B = 0 | front.is_empty, back.pop(None), front.pop(None) | 3 | 0 | 0 | 3 |
+| Pop, F = 0 and B > 0 | front.is_empty, B pairs of back.pop(Some) and front.push, back.pop(None), front.pop(Some) | 2B + 3 | 2B | 0 | 3 |
+
+This witness gives an amortized allowance of three ticks per operation.
+The analyzer checks inequalities for the recognized paths. Translating all
+reachable MIR paths to these obligations is a separate research task (R-006).
+
 ## How it works
 
 ```text

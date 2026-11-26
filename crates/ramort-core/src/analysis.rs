@@ -245,81 +245,22 @@ pub fn analyze_function<S: IntegerLinearSolver>(
     let resources = collect_resource_paths(f);
     let template = PotentialTemplate::from_paths(&resources);
 
-    let mut obligations = Vec::new();
-
-    if f.name == "push" {
-        if let Some(back) = resources
+    let obligations = queue_obligations(f, summaries, &template).unwrap_or_default();
+    let queue_method = matches!(f.name.as_str(), "push" | "pop")
+        && resources
             .iter()
-            .find(|p| p.to_string().ends_with("back"))
-            .cloned()
-        {
-            let b_coeff = template.coeffs[&back].clone();
-            obligations.push(Obligation {
-                name: "push".into(),
-                actual: LinExpr::one(),
-                phi_before: LinExpr::var(format!("{b_coeff}*B"), 1),
-                phi_after: LinExpr::var(format!("{b_coeff}*B"), 1).add(&LinExpr::var(b_coeff, 1)),
-                amortized: LinExpr::var("c_push", 1),
-                explanation: "generic summary: receiver.push increases len(receiver) by 1".into(),
-            });
-        }
-    }
-
-    if f.name == "pop" {
-        let front = resources
-            .iter()
-            .find(|p| p.to_string().ends_with("front"))
-            .cloned();
-        let back = resources
-            .iter()
-            .find(|p| p.to_string().ends_with("back"))
-            .cloned();
-
-        if let (Some(front), Some(back)) = (front, back) {
-            let cf = template.coeffs[&front].clone();
-            let cb = template.coeffs[&back].clone();
-
-            obligations.push(Obligation {
-                name: "pop-normal".into(),
-                actual: LinExpr::one(),
-                phi_before: LinExpr::var(format!("{cf}*F"), 1)
-                    .add(&LinExpr::var(format!("{cb}*B"), 1)),
-                phi_after: LinExpr::var(format!("{cf}*F"), 1)
-                    .add(&LinExpr::var(format!("{cb}*B"), 1)),
-                amortized: LinExpr::var("c_pop", 1),
-                explanation: "normal branch: front.pop and potential unchanged".into(),
-            });
-
-            let before = AbstractState::default()
-                .with_len(front.clone(), LinExpr::var("F", 1))
-                .with_len(back.clone(), LinExpr::var("B", 1));
-
-            if let Some(ls) =
-                infer_draining_loop("drain-back-to-front", &f.events, summaries, &before)
-            {
-                obligations.push(Obligation {
-                    name: "pop-transfer".into(),
-                    actual: ls.cost.add(&LinExpr::one()),
-                    phi_before: LinExpr::var(format!("{cf}*F"), 1)
-                        .add(&LinExpr::var(format!("{cb}*B"), 1)),
-                    phi_after: LinExpr::var(format!("{cf}*F"), 1)
-                        .add(&LinExpr::var(format!("{cf}*B"), 1))
-                        .add(&LinExpr::var(cf, -1)),
-                    amortized: LinExpr::var("c_pop", 1),
-                    explanation: ls.explanation,
-                });
-            }
-        }
-    }
+            .any(|path| path.fields.last().is_some_and(|field| field == "back"));
 
     if obligations.is_empty() {
-        if let Some(report) = analyze_scalar_control_flow(
-            f,
-            resources.is_empty(),
-            policy_status.clone(),
-            diagnostics.clone(),
-        ) {
-            return report;
+        if !queue_method {
+            if let Some(report) = analyze_scalar_control_flow(
+                f,
+                resources.is_empty(),
+                policy_status.clone(),
+                diagnostics.clone(),
+            ) {
+                return report;
+            }
         }
 
         return MethodReport {
@@ -396,6 +337,7 @@ pub fn analyze_function<S: IntegerLinearSolver>(
                 obligations: verified,
                 diagnostics,
                 assumptions: vec![
+                    "Metric: summary ticks on the modeled queue paths. Vec pop costs its call charge on Some and None. Vec push includes its amortized allocation contract. Other control and bookkeeping events cost zero.".into(),
                     "potential inferred by integer LP; exact verification performed".into(),
                 ],
                 bound_legend: vec![],
@@ -420,6 +362,91 @@ pub fn analyze_function<S: IntegerLinearSolver>(
 /// `Complex::floor` calling `f64::floor` is not mistaken for self-recursion.
 fn is_self_call(call: &CallEvent, f: &FunctionIr) -> bool {
     call.callee == f.name || call.callee == f.full_name()
+}
+
+fn queue_obligations(
+    function: &FunctionIr,
+    summaries: &SummaryDb,
+    template: &PotentialTemplate,
+) -> Option<Vec<Obligation>> {
+    let mut calls = Vec::new();
+    for event in &function.events {
+        match event {
+            Event::Call(call) => calls.push(call),
+            Event::Drop { .. } | Event::Unsafe { .. } | Event::Unknown { .. } => return None,
+            Event::Assign(_)
+            | Event::Branch(_)
+            | Event::Cast { .. }
+            | Event::Binop { .. }
+            | Event::Return { .. } => {}
+        }
+    }
+
+    match (function.name.as_str(), calls.as_slice()) {
+        ("push", [push]) if push.method == "push" => {
+            let back = push.receiver.as_ref()?;
+            if !back.to_string().ends_with(".back") {
+                return None;
+            }
+            let coeff = &template.coeffs[back];
+            let before = LinExpr::var(format!("{coeff}*B"), 1);
+            Some(vec![Obligation {
+                name: "push".into(),
+                actual: LinExpr::constant(summaries.constant_ticks(push)?),
+                phi_after: before.add(&LinExpr::var(coeff, 1)),
+                phi_before: before,
+                amortized: LinExpr::var("c_push", 1),
+                explanation: "one back.push".into(),
+            }])
+        }
+        ("pop", [guard, source_pop, push, final_pop]) => {
+            let front = guard.receiver.as_ref()?;
+            let back = source_pop.receiver.as_ref()?;
+            if [
+                guard.method.as_str(),
+                source_pop.method.as_str(),
+                push.method.as_str(),
+                final_pop.method.as_str(),
+            ] != ["is_empty", "pop", "push", "pop"]
+                || !front.to_string().ends_with(".front")
+                || !back.to_string().ends_with(".back")
+                || push.receiver.as_ref() != Some(front)
+                || final_pop.receiver.as_ref() != Some(front)
+            {
+                return None;
+            }
+            let overhead = summaries
+                .constant_ticks(guard)?
+                .checked_add(summaries.constant_ticks(final_pop)?)?;
+            let before = AbstractState::default()
+                .with_len(front.clone(), LinExpr::var("F", 1))
+                .with_len(back.clone(), LinExpr::var("B", 1));
+            let drain =
+                infer_draining_loop("drain-back-to-front", &function.events, summaries, &before)?;
+            let initial_credit = template.phi_for_len_state(&before.lens);
+            let mut transfer_cost = drain.cost;
+            transfer_cost.constant = transfer_cost.constant.checked_add(overhead)?;
+            Some(vec![
+                Obligation {
+                    name: "pop-normal".into(),
+                    actual: LinExpr::constant(overhead),
+                    phi_before: initial_credit.clone(),
+                    phi_after: initial_credit.clone(),
+                    amortized: LinExpr::var("c_pop", 1),
+                    explanation: "front.is_empty and front.pop".into(),
+                },
+                Obligation {
+                    name: "pop-transfer".into(),
+                    actual: transfer_cost,
+                    phi_before: initial_credit,
+                    phi_after: template.phi_for_len_state(&drain.after.lens),
+                    amortized: LinExpr::var("c_pop", 1),
+                    explanation: "front.is_empty, drain through the final unsuccessful back.pop, then front.pop".into(),
+                },
+            ])
+        }
+        _ => None,
+    }
 }
 
 fn collect_resource_paths(f: &FunctionIr) -> Vec<ResourcePath> {
@@ -1118,7 +1145,7 @@ mod tests {
                     ("a_self_front".into(), 0),
                     ("a_self_back".into(), 2),
                     ("c_push".into(), 0),
-                    ("c_pop".into(), 1),
+                    ("c_pop".into(), 3),
                     ("c_method".into(), 0),
                 ]),
             })
@@ -1233,14 +1260,29 @@ mod tests {
             vec!["pop-normal", "pop-transfer"]
         );
         assert!(report.obligations.iter().all(|o| o.check.proven));
+        let transfer = &report.obligations[1].obligation;
+        for (back_len, expected_ticks) in [(0, 3), (3, 9)] {
+            let sizes = BTreeMap::from([("F".into(), 0), ("B".into(), back_len)]);
+            assert_eq!(
+                transfer.actual.substitute(&sizes),
+                LinExpr::constant(expected_ticks)
+            );
+            assert_eq!(
+                transfer.phi_before.substitute(&sizes),
+                LinExpr::constant(2 * back_len)
+            );
+            assert_eq!(transfer.phi_after.substitute(&sizes), LinExpr::zero());
+        }
+        assert_eq!(
+            report.obligations[0].obligation.actual,
+            LinExpr::constant(2)
+        );
 
         let problem = solver.problem.borrow().clone().unwrap();
         assert_constraint_rhs(
             &problem,
             "pop-transfer:constant",
-            LinExpr::constant(-1)
-                .add(&LinExpr::var("a_self_front", 1))
-                .add(&LinExpr::var("c_pop", 1)),
+            LinExpr::constant(-3).add(&LinExpr::var("c_pop", 1)),
         );
         assert_constraint_rhs(
             &problem,
@@ -1253,6 +1295,33 @@ mod tests {
             .constraints
             .iter()
             .all(|c| c.name != "pop-transfer:coeff:F"));
+    }
+
+    #[test]
+    fn queue_pop_respects_summary_charges_and_missing_contracts() {
+        let function = queue_pop_ir();
+        let template = PotentialTemplate::from_paths(&collect_resource_paths(&function));
+        let mut summaries = SummaryDb::trusted_std();
+        let pop = summaries
+            .summaries
+            .iter_mut()
+            .find(|summary| summary.method == "pop")
+            .unwrap();
+        pop.amortized_cost = Some("4".into());
+        let obligations = queue_obligations(&function, &summaries, &template).unwrap();
+        assert_eq!(obligations[0].actual, LinExpr::constant(5));
+        assert_eq!(
+            obligations[1].actual,
+            LinExpr::constant(9).add(&LinExpr::var("B", 5))
+        );
+        let report = analyze_function(
+            &function,
+            &SummaryDb::empty(),
+            &CapturingSolver::default(),
+            &AnalysisOptions::default(),
+        );
+        assert_eq!(report.status, Status::Partial);
+        assert!(report.obligations.is_empty());
     }
 
     fn assert_constraint_rhs(problem: &LinearProblem, name: &str, rhs: LinExpr) {

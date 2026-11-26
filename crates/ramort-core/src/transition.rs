@@ -62,11 +62,12 @@ pub fn interpret_events(
     summaries: &SummaryDb,
 ) -> Transition {
     let mut state = before.clone();
+    let mut actual = LinExpr::zero();
     for ev in events {
         match ev {
             Event::Call(c) => {
                 if let Some(m) = summaries.match_call(c) {
-                    state.actual_cost = state.actual_cost.add(&m.cost);
+                    actual = actual.add(&m.cost);
                     if let Some(cond) = m.condition {
                         if cond.contains("len(receiver) == 0") {
                             if let Some(r) = &c.receiver {
@@ -99,15 +100,54 @@ pub fn interpret_events(
             Event::Unknown { detail, .. } => state
                 .partial_unknowns
                 .push(format!("unknown MIR event: {detail}")),
-            _ => {}
+            Event::Drop { .. } => state.partial_unknowns.push("unmodeled drop cost".into()),
+            Event::Assign(_) | Event::Cast { .. } | Event::Binop { .. } | Event::Return { .. } => {}
         }
     }
 
+    state.actual_cost = before.actual_cost.add(&actual);
     Transition {
         name: name.into(),
         before,
-        after: state.clone(),
-        actual: state.actual_cost,
+        after: state,
+        actual,
         explanation: "generic event interpretation".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{AccessKind, CallEvent};
+
+    #[test]
+    fn transition_charges_only_its_own_ticks_and_records_unmodeled_work() {
+        let before = AbstractState {
+            actual_cost: LinExpr::constant(7),
+            ..Default::default()
+        };
+        let call = Event::Call(CallEvent {
+            block: 0,
+            callee: "Vec::push".into(),
+            method: "push".into(),
+            receiver: Some(ResourcePath::self_field("back")),
+            receiver_ty: Some("Vec<u8>".into()),
+            receiver_access: AccessKind::MutBorrow,
+            args: vec![],
+            is_trait_call: false,
+            destination: None,
+        });
+        let events = [
+            call,
+            Event::Drop {
+                block: 1,
+                target: None,
+            },
+            Event::Return { block: 2 },
+        ];
+        let step = interpret_events("step", before, &events, &SummaryDb::trusted_std());
+        assert_eq!(step.actual, LinExpr::one());
+        assert_eq!(step.after.actual_cost, LinExpr::constant(8));
+        assert_eq!(step.after.partial_unknowns, ["unmodeled drop cost"]);
     }
 }

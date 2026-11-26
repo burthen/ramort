@@ -34,38 +34,9 @@ mod tests {
 
     #[test]
     fn verifies_queue_pop_certificate_with_encoded_product_terms() {
-        let cert = Certificate {
-            function: "Queue::pop".into(),
-            potential: "2*len(self.back)".into(),
-            coefficients: BTreeMap::from([
-                ("a_self_front".into(), 0),
-                ("a_self_back".into(), 2),
-                ("c_pop".into(), 1),
-            ]),
-            obligations: vec![
-                Obligation {
-                    name: "pop-normal".into(),
-                    actual: LinExpr::one(),
-                    phi_before: LinExpr::var("a_self_front*F", 1)
-                        .add(&LinExpr::var("a_self_back*B", 1)),
-                    phi_after: LinExpr::var("a_self_front*F", 1)
-                        .add(&LinExpr::var("a_self_back*B", 1)),
-                    amortized: LinExpr::var("c_pop", 1),
-                    explanation: "normal branch: front.pop".into(),
-                },
-                Obligation {
-                    name: "pop-transfer".into(),
-                    actual: LinExpr::one().add(&LinExpr::var("B", 2)),
-                    phi_before: LinExpr::var("a_self_front*F", 1)
-                        .add(&LinExpr::var("a_self_back*B", 1)),
-                    phi_after: LinExpr::var("a_self_front*F", 1)
-                        .add(&LinExpr::var("a_self_front*B", 1))
-                        .add(&LinExpr::var("a_self_front", -1)),
-                    amortized: LinExpr::var("c_pop", 1),
-                    explanation: "draining loop back->front".into(),
-                },
-            ],
-        };
+        let cert: Certificate =
+            serde_json::from_str(include_str!("../../../certificates/queue_pop.cert.json"))
+                .unwrap();
 
         let check = check_certificate(&cert);
 

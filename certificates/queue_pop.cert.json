@@ -4,13 +4,13 @@
   "coefficients": {
     "a_self_front": 0,
     "a_self_back": 2,
-    "c_pop": 1
+    "c_pop": 3
   },
   "obligations": [
     {
       "name": "pop-normal",
       "actual": {
-        "constant": 1,
+        "constant": 2,
         "terms": {}
       },
       "phi_before": {
@@ -33,12 +33,12 @@
           "c_pop": 1
         }
       },
-      "explanation": "normal branch: front.pop"
+      "explanation": "front.is_empty and front.pop"
     },
     {
       "name": "pop-transfer",
       "actual": {
-        "constant": 1,
+        "constant": 3,
         "terms": {
           "B": 2
         }
@@ -54,8 +54,7 @@
         "constant": 0,
         "terms": {
           "a_self_front*F": 1,
-          "a_self_front*B": 1,
-          "a_self_front": -1
+          "a_self_front*B": 1
         }
       },
       "amortized": {
@@ -64,7 +63,7 @@
           "c_pop": 1
         }
       },
-      "explanation": "draining loop back->front"
+      "explanation": "front.is_empty, drain through the final unsuccessful back.pop, then front.pop"
     }
   ]
 }
