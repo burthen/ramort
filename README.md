@@ -107,6 +107,18 @@ ranking or termination claim.
 
 ## How it works
 
+The guarded ranking pass follows unsigned countdown and halving loops with a
+positive header guard and a single path back to the header. Each completed
+iteration must decrement the same local by one or reduce it by at least half.
+An opaque call, a second update of the rank, or an unaccounted cycle stops the
+proof. For initial value n the respective bounds are n and ceil(log2(n+1)).
+
+For sequential loops the pass combines a checked count with constant unsigned
+increments to bound sizes at the next header. Adding two to a zero counter on
+each of at most n iterations gives an exit bound of 2n, including when modular
+arithmetic wraps. Diagnostics retain already established loop bounds if the
+block budget runs out. The default budget is 4096 blocks per function.
+
 ```text
 Rust source ──► rustc/MIR ──► FunctionIr (events + CFG) ──► analyses ──► AnalysisReport
                   ▲                                              ▲
@@ -153,7 +165,7 @@ Output:
 
 ```text
 RAMORT analysis: examples/pow.rs
-summary: 2 proven  3 partial  0 undefined
+summary: 1 proven  4 partial  0 undefined
 
 [proven] power_iter      O(n)
   where:     n = `degree` (loop range bound)
@@ -164,12 +176,7 @@ summary: 2 proven  3 partial  0 undefined
   potential: none inferred
   reason:    extracted recurrence T(n) = 1*T(n-1) + O(1) (solved by linear recurrence T(n) = T(n−1) + f(n) ⇒ O(n · f(n)))
 
-[proven] power_log       O(log n)
-  where:     n = `degree` (loop ranking variable)
-  potential: none inferred
-  reason:    ranking function `degree` proves termination via path-sensitive logarithmic decrease
-  reason:    `degree` halved on every back-edge path
-  reason:    loop body has no Call events ⇒ constant cost per iteration
+[partial] power_log       O(?)
 
 [partial] count_time      O(?)
   potential: none inferred
@@ -201,13 +208,7 @@ treated as `O(1)`.
 body) are merged into one logical loop. Range struct-literal aggregates
 (`0..n`) are recognized alongside explicit `Range::new` calls.
 
-**Path-sensitive ranking analysis.** A `while`-loop is bounded by exhibiting a
-variable that strictly decreases on every cycle through the loop header.
-`Sub`-by-≥1 yields linear ranking (`O(V)`); `Div`-by-≥2 or `Shr`-by-≥1 yields
-logarithmic (`O(log V)`). Path-sensitivity is verified over the function CFG:
-in the subgraph that excludes "progress blocks", the header must not be on a
-cycle. When the loop body is constant-cost (no `Call` events), the bound is
-promoted to `Proven`.
+**Ranking analysis.** Guarded integer transitions establish per-loop bounds for the unsigned fragment described above. Mixed decrement and halving branches require a separate proof.
 
 **Nested-loop composition.** Outer loop bound × max(inner subtree bounds) for
 nesting; max for sibling loops at the same level. Logarithmic factors are
@@ -241,7 +242,7 @@ pointers as `Partial`.
 | `examples/fft.rs`      | `fft`              | `O(n log n)`| partial  | nested loops + `ilog2` chain                        |
 | `examples/pow.rs`      | `power_iter`       | `O(n)`      | proven   | range for-loop                                      |
 | `examples/pow.rs`      | `power_recursive`  | `O(n)`      | partial  | linear recurrence                                   |
-| `examples/pow.rs`      | `power_log`        | `O(log n)`  | proven   | ranking function (logarithmic, constant body)       |
+| `examples/pow.rs` | `power_log` | `O(?)` | partial | mixed decrement and halving paths |
 
 ## Crates
 

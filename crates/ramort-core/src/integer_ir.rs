@@ -18,6 +18,8 @@ pub enum IntegerRhs {
     Use(IntegerValue),
     WrappingAdd(IntegerValue, IntegerValue),
     WrappingSub(IntegerValue, IntegerValue),
+    Divide(IntegerValue, IntegerValue),
+    ShiftRight(IntegerValue, IntegerValue),
     AddWithOverflow(IntegerValue, IntegerValue),
     SubWithOverflow(IntegerValue, IntegerValue),
     Compare {

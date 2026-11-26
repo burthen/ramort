@@ -22,6 +22,9 @@
 use crate::ir::{Event, FunctionIr, LoopRegion};
 use std::collections::BTreeSet;
 
+mod guarded;
+pub use guarded::{check_loop_counts, CountAnalysis, LoopCount};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RankingClass {
     /// `V → 0` by `Sub`-by-≥1 on every path.
@@ -40,6 +43,15 @@ pub struct RankingFunction {
 /// Search for a ranking function on a single loop region. Returns the first
 /// candidate variable that passes the path-sensitive monotonicity check.
 pub fn find_ranking_function(f: &FunctionIr, region: &LoopRegion) -> Option<RankingFunction> {
+    if !f.integer_blocks.is_empty() {
+        let header = *region.blocks.first()?;
+        let count = check_loop_counts(f, 4096).counts.into_iter().find(|count| count.header == header)?;
+        return Some(RankingFunction {
+            variable: format!("_{}", count.rank),
+            class: if count.halves { RankingClass::Logarithmic } else { RankingClass::Linear },
+            witness: format!("positive unsigned rank at bb{header}; iterations <= {}", count.iterations()),
+        });
+    }
     let region_set: BTreeSet<usize> = region.blocks.iter().copied().collect();
     let &header = region.blocks.first()?;
 

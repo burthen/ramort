@@ -957,13 +957,43 @@ fn analyze_via_ranking(
         return None;
     }
 
+    if !f.integer_blocks.is_empty() {
+        let analysis = crate::ranking::check_loop_counts(f, 4096);
+        let complete = analysis.complete && !analysis.counts.is_empty();
+        let logarithmic = analysis.counts.iter().all(|count| count.halves);
+        for count in &analysis.counts {
+            diagnostics.push(Diagnostic::info(format!(
+                "bb{}: unsigned _{} is positive on entry to the body and decreases on every back edge; iterations <= {}",
+                count.header, count.rank, count.iterations()
+            )));
+        }
+        if !complete {
+            diagnostics.push(Diagnostic::warn("Unsupported transition, unproved rank, or block budget exhausted"));
+        }
+        return Some(MethodReport {
+            method: f.full_name(),
+            status: if complete { policy_status } else { Status::Partial },
+            amortized_bound: match (complete, logarithmic) {
+                (true, true) => "O(log n)",
+                (true, false) => "O(n)",
+                _ => "O(?)",
+            }.into(),
+            symbolic_amortized_bound: None,
+            potential: None,
+            obligations: vec![],
+            diagnostics,
+            assumptions: vec!["Constant work per modeled integer block on normal execution".into()],
+            bound_legend: vec!["n = maximum of 1 and the unsigned entry sizes in the loop-count witnesses".into()],
+        });
+    }
+
     // Merge loop regions sharing a header — one logical loop with multiple
     // back-edges yields multiple `LoopRegion`s, but the ranking analysis
     // needs to see the union so progress events on every branch are visible.
     let merged = merge_regions_by_header(&f.loops);
-    let (matched_region, ranking) = merged
+    let ranking = merged
         .iter()
-        .find_map(|region| find_ranking_function(f, region).map(|rf| (region, rf)))?;
+        .find_map(|region| find_ranking_function(f, region))?;
 
     // Render the bound in canonical-`n` form. The actual ranking variable's
     // identity goes into the legend so the reader can resolve `n` back to
@@ -983,28 +1013,11 @@ fn analyze_via_ranking(
         ranking.variable, class_label, ranking.witness
     )));
 
-    // Promote to Proven when the ranking proof is sound AND the loop body has
-    // no `Call` events (i.e. constant-cost per iteration). Calls would need a
-    // pass-1 callee bound to classify; for now, "no calls" is the cheap-and-
-    // sound check that handles arithmetic-only loops like `power_log`.
-    let body_constant = loop_body_is_constant_cost(f, matched_region);
-    let mut assumptions = vec![
-        format!(
-            "ranking function `{}` proves termination via path-sensitive {} decrease",
-            ranking.variable, class_label
-        ),
+    let assumptions = vec![
+        "Legacy IR lacks guarded machine-integer edges for checking progress".into(),
         ranking.witness,
     ];
-    let status = if policy_status != Status::Proven {
-        policy_status
-    } else if body_constant {
-        assumptions.push(
-            "loop body has no Call events ⇒ constant cost per iteration".to_string(),
-        );
-        Status::Proven
-    } else {
-        Status::Partial
-    };
+    let status = if policy_status == Status::Undefined { Status::Undefined } else { Status::Partial };
 
     Some(MethodReport {
         method: f.full_name(),
@@ -1019,17 +1032,6 @@ fn analyze_via_ranking(
     })
 }
 
-/// Returns `true` if the loop region contains no `Event::Call`. This is a
-/// conservative "constant body cost" check: Binops, Casts, Branches, Returns
-/// are all bounded individually, so a body that's exclusively those events
-/// runs in `O(1)` per iteration.
-fn loop_body_is_constant_cost(f: &FunctionIr, region: &crate::ir::LoopRegion) -> bool {
-    let region_set: std::collections::BTreeSet<usize> =
-        region.blocks.iter().copied().collect();
-    !f.events.iter().any(|e| {
-        matches!(e, Event::Call(c) if region_set.contains(&c.block))
-    })
-}
 
 /// Rewrite a per-function bound (e.g. `O(degree)`, `O(last)`) into the
 /// canonical `O(n)` form, returning the new string and a legend that records

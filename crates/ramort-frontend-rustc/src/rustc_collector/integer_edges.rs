@@ -52,6 +52,8 @@ fn update<'tcx>(
             let expression = match op {
                 BinOp::Add => IntegerRhs::WrappingAdd(left, right),
                 BinOp::Sub => IntegerRhs::WrappingSub(left, right),
+                BinOp::Div => IntegerRhs::Divide(left, right),
+                BinOp::Shr => IntegerRhs::ShiftRight(left, right),
                 BinOp::AddWithOverflow => IntegerRhs::AddWithOverflow(left, right),
                 BinOp::SubWithOverflow => IntegerRhs::SubWithOverflow(left, right),
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
