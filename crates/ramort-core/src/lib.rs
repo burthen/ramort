@@ -16,6 +16,7 @@
 
 pub mod alias_model;
 pub mod analysis;
+pub mod bound;
 pub mod cargo_integration;
 pub mod certificate;
 pub mod constraints;
@@ -24,6 +25,7 @@ pub mod explain;
 pub mod expr;
 pub mod generics;
 pub mod interproc;
+pub mod integer_ir;
 pub mod ir;
 pub mod loop_summary;
 pub mod lp;

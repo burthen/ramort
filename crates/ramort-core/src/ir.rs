@@ -76,6 +76,8 @@ pub struct FunctionIr {
     /// that don't want them filter explicitly.
     #[serde(default)]
     pub successors: Vec<Vec<usize>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub integer_blocks: Vec<crate::integer_ir::IntegerBlock>,
 }
 
 impl FunctionIr {

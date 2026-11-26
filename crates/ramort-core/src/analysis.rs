@@ -183,6 +183,7 @@ fn try_solve_recurrence(f: &FunctionIr, reports: &[MethodReport]) -> Option<Meth
         method: f.full_name(),
         status: Status::Partial,
         amortized_bound: solution.bound.to_string(),
+        symbolic_amortized_bound: None,
         potential: None,
         obligations: vec![],
         diagnostics,
@@ -271,6 +272,7 @@ pub fn analyze_function<S: IntegerLinearSolver>(
                 Status::Partial
             },
             amortized_bound: "O(?)".into(),
+            symbolic_amortized_bound: None,
             potential: None,
             obligations: vec![],
             diagnostics: {
@@ -331,6 +333,18 @@ pub fn analyze_function<S: IntegerLinearSolver>(
 
             MethodReport {
                 method: f.full_name(),
+                symbolic_amortized_bound: if status == Status::Proven {
+                    sol.values
+                        .get(&format!("c_{}", f.name))
+                        .and_then(|value| u64::try_from(*value).ok())
+                        .map(|value| crate::bound::SymbolicBound {
+                            expression: crate::bound::BoundExpr::Constant(value),
+                            unit: crate::bound::BoundUnit::SummaryTicks,
+                            requires: Vec::new(),
+                        })
+                } else {
+                    None
+                },
                 status,
                 amortized_bound: "O(1)".into(),
                 potential: Some(potential),
@@ -347,6 +361,7 @@ pub fn analyze_function<S: IntegerLinearSolver>(
             method: f.full_name(),
             status: Status::Undefined,
             amortized_bound: "O(?)".into(),
+            symbolic_amortized_bound: None,
             potential: None,
             obligations: vec![],
             diagnostics: vec![Diagnostic::error(format!("solver failed: {e}"))],
@@ -488,6 +503,7 @@ fn analyze_scalar_control_flow(
             method: f.full_name(),
             status: Status::Undefined,
             amortized_bound: "O(?)".into(),
+            symbolic_amortized_bound: None,
             potential: None,
             obligations: vec![],
             diagnostics,
@@ -507,6 +523,7 @@ fn analyze_scalar_control_flow(
             method: f.full_name(),
             status: Status::Partial,
             amortized_bound: "O(?)".into(),
+            symbolic_amortized_bound: None,
             potential: None,
             obligations: vec![],
             diagnostics,
@@ -524,6 +541,7 @@ fn analyze_scalar_control_flow(
                 method: f.full_name(),
                 status: Status::Partial,
                 amortized_bound: "O(?)".into(),
+                symbolic_amortized_bound: None,
                 potential: None,
                 obligations: vec![],
                 diagnostics,
@@ -555,6 +573,7 @@ fn analyze_scalar_control_flow(
             method: f.full_name(),
             status: Status::Partial,
             amortized_bound: "O(?)".into(),
+            symbolic_amortized_bound: None,
             potential: None,
             obligations: vec![],
             diagnostics,
@@ -573,6 +592,7 @@ fn analyze_scalar_control_flow(
             Status::Proven
         },
         amortized_bound: canonical_bound,
+        symbolic_amortized_bound: None,
         potential: Some("0".into()),
         obligations: vec![],
         diagnostics,
@@ -737,6 +757,7 @@ fn analyze_nested_loops(
         method: f.full_name(),
         status,
         amortized_bound: total.to_string(),
+        symbolic_amortized_bound: None,
         potential: None,
         obligations: vec![],
         diagnostics,
@@ -989,6 +1010,7 @@ fn analyze_via_ranking(
         method: f.full_name(),
         status,
         amortized_bound: bound,
+        symbolic_amortized_bound: None,
         potential: None,
         obligations: vec![],
         diagnostics,
@@ -1162,6 +1184,7 @@ mod tests {
             blocks: 5,
             loops: vec![],
             successors: vec![],
+            integer_blocks: vec![],
             events: vec![
                 Event::Branch(crate::ir::BranchEvent {
                     block: 0,
@@ -1198,6 +1221,7 @@ mod tests {
                 blocks: vec![3, 4, 5, 6],
             }],
             successors: vec![],
+            integer_blocks: vec![],
             events: vec![
                 scalar_call(
                     0,
@@ -1261,6 +1285,10 @@ mod tests {
         );
         assert!(report.obligations.iter().all(|o| o.check.proven));
         let transfer = &report.obligations[1].obligation;
+        assert_eq!(
+            report.symbolic_amortized_bound.as_ref().unwrap().expression,
+            crate::bound::BoundExpr::Constant(3)
+        );
         for (back_len, expected_ticks) in [(0, 3), (3, 9)] {
             let sizes = BTreeMap::from([("F".into(), 0), ("B".into(), back_len)]);
             assert_eq!(
@@ -1364,6 +1392,7 @@ mod tests {
             blocks: 4,
             loops: vec![LoopRegion { blocks: vec![1, 2] }],
             successors: vec![],
+            integer_blocks: vec![],
             events: vec![
                 vec_call(0, "is_empty", front.clone(), AccessKind::SharedBorrow),
                 vec_call(1, "pop", back, AccessKind::MutBorrow),

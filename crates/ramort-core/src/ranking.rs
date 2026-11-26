@@ -210,6 +210,7 @@ mod tests {
             events,
             loops: vec![],
             successors,
+            integer_blocks: vec![],
         }
     }
 

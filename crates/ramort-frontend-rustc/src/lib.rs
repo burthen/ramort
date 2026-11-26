@@ -38,6 +38,7 @@ pub mod place_resolver;
 
 #[cfg(feature = "rustc-private-link")]
 mod rustc_collector {
+    mod integer_edges;
     use super::*;
     use ramort_core::ir::{AssignEvent, BranchEvent, PathCondition};
     use ramort_core::{
@@ -183,6 +184,7 @@ mod rustc_collector {
             events,
             loops: collect_loop_regions(body),
             successors: collect_successors(body),
+            integer_blocks: integer_edges::collect(tcx, body),
         }
     }
 

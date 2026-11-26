@@ -74,6 +74,37 @@ This witness gives an amortized allowance of three ticks per operation.
 The analyzer checks inequalities for the recognized paths. Translating all
 reachable MIR paths to these obligations is a separate research task (R-006).
 
+## Symbolic reports and integer transitions
+
+The JSON method report retains its growth class and symbol legend. A verified
+queue allowance also includes `symbolic_amortized_bound` in summary ticks.
+Entry sizes refer to a named argument or field projection and count elements,
+bytes, or nonnegative scalar units. Bound expressions operate on those numeric
+magnitudes using constants, sums, products, maxima, and ceiling log base two
+(with value zero at input zero). A missing expression means the method has no
+explicit numeric allowance. The report's assumptions still apply.
+
+`SymbolicBound::substitute` rewrites a formal input in both the bound and its
+minimum-size requirements. For a cost of m² ticks valid at m ≥ 1, supplying
+2n elements gives (2n)² ticks subject to 2n ≥ 1. Substituting bytes for an
+element count returns an error. This API composes supplied contracts. The
+analyzer's existing affine solver and asymptotic classifications are unchanged.
+
+`ramort-rustc dump-ir` includes `integer_blocks` alongside the original
+successor lists. Apply each block's local assignments in order, then evaluate
+the chosen edge guard. Case values and integer literals encode unsigned bit
+patterns as decimal strings, including 128-bit values. The operand width and
+signedness determine their interpretation. Comparisons produce a boolean.
+Checked addition and subtraction produce a pair (wrapped result, overflow flag).
+Pointer-sized integers use rustc's compilation target.
+
+A call-return edge records where the callee writes its result. Its effects
+require a summary. An entry in a block's `unsupported` list makes its outgoing
+transitions incomplete, even when a guard is known. Unsupported edges identify
+their destination individually. Assertion failures that leave the function
+are recorded at the source. These records describe MIR and do not upgrade any
+ranking or termination claim.
+
 ## How it works
 
 ```text

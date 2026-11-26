@@ -40,6 +40,8 @@ pub struct MethodReport {
     pub method: String,
     pub status: Status,
     pub amortized_bound: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbolic_amortized_bound: Option<crate::bound::SymbolicBound>,
     pub potential: Option<String>,
     pub obligations: Vec<VerifiedObligation>,
     pub diagnostics: Vec<Diagnostic>,
